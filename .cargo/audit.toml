@@ -1,0 +1,4 @@
+[advisories]
+# webpki-roots 0.26.11 re-exports the patched 1.0.10 bundle. It is retained
+# by async-nats' disabled WebSocket feature and is absent from our build graph.
+ignore = ["RUSTSEC-2026-0381"]
