@@ -99,6 +99,10 @@
               pkgs.natscli
               pkgs.nixfmt
               pkgs.taplo
+              pkgs.yamlfmt
+              pkgs.actionlint
+              pkgs.cargo-audit
+              pkgs.gitleaks
               mdformat
             ];
           };

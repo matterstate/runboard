@@ -198,6 +198,18 @@ The flake uses flake-parts, devshell, Crane and rust-overlay. Targets are x86-64
 Linux, ARM64 Linux and ARM64 macOS. The shell matches the Conform formatters.
 Generated files are left to their generators.
 
+GitHub CI builds and checks all three platforms on pushes to `main` and pull
+requests. Linux CI also checks repository formatting, dependency advisories and
+Git history for secrets.
+
+Set `services.runboard.deploy.enable = true` for automatic NixOS deployments. A
+dedicated user checks the public GitHub repository every two minutes and builds
+the exact revision only after its `CI` push workflow succeeds. Activation
+restarts runboard and checks `/healthz`; a failed health check restores the
+previous release. Builds need no GitHub token or inbound deployment port. The
+first release starts after CI passes. Keep deployment disabled for private
+repositories; the pull service uses public HTTPS access.
+
 Generate synthetic input in a fresh directory with
 `cargo run --example demo -- target/demo`, then serve it with
 `cargo run -- --root demo=target/demo --artifacts`.

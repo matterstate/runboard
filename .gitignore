@@ -13,6 +13,7 @@
 !/rust-analyzer.toml
 !/.cargo/config.toml
 !/.cargo/audit.toml
+!/.github/workflows/*.yml
 
 !/src/**/*.rs
 !/nix/**/*.nix

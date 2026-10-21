@@ -7,6 +7,11 @@ self:
 }:
 let
   settings = config.services.runboard;
+  program =
+    if settings.deploy.enable then
+      "/var/lib/runboard-deploy/current/bin/runboard"
+    else
+      lib.getExe settings.package;
   arguments = [
     "--state-dir"
     "/var/lib/runboard"
@@ -70,6 +75,22 @@ in
       default = null;
       description = "Existing user for private project files and Pueue. Null uses a dynamic user.";
     };
+    deploy = {
+      enable = lib.mkEnableOption "pull deployment of main revisions that pass GitHub CI";
+      repository = lib.mkOption {
+        type = lib.types.strMatching "[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+";
+        default = "matterstate/runboard";
+      };
+      branch = lib.mkOption {
+        type = lib.types.strMatching "[A-Za-z0-9_.-]+";
+        default = "main";
+      };
+      healthUrl = lib.mkOption {
+        type = lib.types.str;
+        default = "http://${settings.listen}/healthz";
+        description = "Health endpoint checked after activation and rollback.";
+      };
+    };
   };
   config = lib.mkIf settings.enable {
     assertions = [
@@ -82,8 +103,9 @@ in
       description = "Run metrics, queue state and telemetry";
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
+      unitConfig.ConditionPathExists = program;
       serviceConfig = {
-        ExecStart = "${lib.getExe settings.package} ${lib.escapeShellArgs arguments}";
+        ExecStart = "${program} ${lib.escapeShellArgs arguments}";
         DynamicUser = settings.user == null;
         StateDirectory = "runboard";
         StateDirectoryMode = "0700";
@@ -97,6 +119,53 @@ in
         ProtectSystem = "strict";
       }
       // lib.optionalAttrs (settings.user != null) { User = settings.user; };
+    };
+    users.users.runboard-deploy = lib.mkIf settings.deploy.enable {
+      isSystemUser = true;
+      group = "runboard-deploy";
+      home = "/var/lib/runboard-deploy";
+    };
+    users.groups.runboard-deploy = lib.mkIf settings.deploy.enable { };
+    systemd.services.runboard-deploy = lib.mkIf settings.deploy.enable {
+      description = "Build and deploy runboard revisions that pass CI";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      path = [
+        pkgs.curl
+        pkgs.git
+        pkgs.nix
+        pkgs.systemd
+      ];
+      environment = {
+        DEPLOY_REPOSITORY = settings.deploy.repository;
+        DEPLOY_BRANCH = settings.deploy.branch;
+        DEPLOY_HEALTH_URL = settings.deploy.healthUrl;
+        GIT_TERMINAL_PROMPT = "0";
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        User = "runboard-deploy";
+        Group = "runboard-deploy";
+        StateDirectory = "runboard-deploy";
+        StateDirectoryMode = "0755";
+        ExecCondition = "${settings.package}/bin/runboard-deploy check";
+        ExecStart = "${settings.package}/bin/runboard-deploy build";
+        ExecStartPost = "+${settings.package}/bin/runboard-deploy activate";
+        TimeoutStartSec = "20min";
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectHome = true;
+        ProtectSystem = "strict";
+      };
+    };
+    systemd.timers.runboard-deploy = lib.mkIf settings.deploy.enable {
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = "2min";
+        OnUnitInactiveSec = "2min";
+        RandomizedDelaySec = 15;
+        Unit = "runboard-deploy.service";
+      };
     };
   };
 }

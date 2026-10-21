@@ -1,5 +1,6 @@
 [package]
 name = "runboard"
+default-run = "runboard"
 version = "0.1.0"
 edition = "2021"
 description = "Read-only run metrics, queue history and device telemetry from files, served as HTML"

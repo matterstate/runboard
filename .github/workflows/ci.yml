@@ -1,0 +1,47 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            system: x86_64-linux
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+          - runner: macos-15
+            system: aarch64-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: cachix/install-nix-action@3c6342b75005b9cc7c7d4069c3e9179247c89012
+      - name: Build, test, lint and format Rust
+        run: >-
+          nix build --print-build-logs --no-link .#checks.${{ matrix.system }}.runboard .#checks.${{ matrix.system }}.clippy .#checks.${{ matrix.system }}.rustfmt
+      - name: Check repository formatting
+        if: matrix.system == 'x86_64-linux'
+        run: |
+          nix develop --command nixfmt --check flake.nix nix/module.nix
+          nix develop --command taplo format --check Cargo.toml rustfmt.toml .cargo/audit.toml
+          nix develop --command mdformat --check --wrap 80 --number README.md
+          nix develop --command yamlfmt -lint .github/workflows/ci.yml
+          nix develop --command actionlint
+      - name: Audit dependencies and history
+        if: matrix.system == 'x86_64-linux'
+        run: |
+          nix develop --command cargo audit
+          nix develop --command gitleaks git --redact --no-banner
