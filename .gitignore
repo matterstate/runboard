@@ -19,10 +19,3 @@
 !/nix/**/*.nix
 !/examples/**/*.rs
 !/images/*.webp
-
-/target/
-/output/
-/docs/
-/.direnv/
-/result
-/result-*
