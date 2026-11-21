@@ -237,6 +237,7 @@ filesystem sandbox. The server never writes producer files.
 nix develop
 cargo test --all-targets
 cargo clippy --all-targets -- -D warnings
+leptosfmt --config-file leptosfmt.toml src/html.rs
 cargo fmt --all
 nixfmt flake.nix nix/module.nix
 taplo format Cargo.toml rustfmt.toml
@@ -253,6 +254,12 @@ python -m unittest discover -s python/tests
 ast-grep scan
 ast-grep test
 ```
+
+The shared page layout and SVG charts use rstml-ssr 0.4 with fallible rendering
+and a 32 MiB document budget. Route-specific tables and forms still use escaped
+fragment builders in `src/app.rs`; those are the remaining template migration
+boundary. Only application-generated fragments and bundled scripts/styles bypass
+rstml-ssr escaping.
 
 The flake uses flake-parts, devshell, Crane and rust-overlay. Targets are x86-64
 Linux, ARM64 Linux and ARM64 macOS. The shell matches the Conform formatters.

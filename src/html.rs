@@ -1,5 +1,8 @@
+use rstml_ssr::{component, html, render_scope_with_limit, RenderResult, TrustedHtml};
 use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub const PAGE_BYTES_MAX: u32 = 32 << 20;
 
 pub struct Series {
     pub label: String,
@@ -67,22 +70,55 @@ pub fn now() -> f64 {
         .unwrap_or(0.0)
 }
 
-pub fn page(title: &str, body: &str, offline: bool) -> String {
-    let navigation = if offline {
-        ""
-    } else {
-        "<nav><a href=\"/\">Runs</a><a href=\"/jobs\">Queue</a><a href=\"/device\">Devices</a><a href=\"/diagnostics\">Inputs</a><span id=\"live-status\" class=\"dim\" role=\"status\">Connecting…</span></nav>"
-    };
+#[component]
+fn Navigation() -> RenderResult {
+    html! {
+        <nav>
+            <a href="/">"Runs"</a>
+            <a href="/jobs">"Queue"</a>
+            <a href="/device">"Devices"</a>
+            <a href="/diagnostics">"Inputs"</a>
+            <span id="live-status" class="dim" role="status">
+                "Connecting…"
+            </span>
+        </nav>
+    }
+}
+
+/// Body markup comes only from the application's escaped fragment builders.
+/// Producer text must never be passed as body markup.
+pub fn page(title: &str, body: &str, offline: bool) -> RenderResult<String> {
     let live = if offline { "" } else { LIVE_SCRIPT };
-    format!(
-        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>{} · runboard</title>
-<style>{STYLE}</style></head><body>{navigation}<main><h1>{}</h1>{body}</main>
-<script>{SCRIPT}
-{live}
-</script></body></html>"#,
-        escape(title),
-        escape(title)
+    let navigation = component(|output| {
+        if !offline {
+            html! { output, <Navigation /> }
+        } else {
+            Ok(())
+        }
+    });
+    render_scope_with_limit(
+        |output| {
+            html! { output,
+                <!DOCTYPE html>
+                <html lang="en">
+                    <head>
+                        <meta charset="utf-8" />
+                        <meta name="viewport" content="width=device-width" />
+                        <title>{title}" · runboard"</title>
+                        <style>{TrustedHtml(STYLE)}</style>
+                    </head>
+                    <body>
+                        {navigation} <main>
+                            <h1>{title}</h1>
+                            {TrustedHtml(body)}
+                        </main> <script>{TrustedHtml(SCRIPT)}{TrustedHtml(live)}</script>
+                    </body>
+                </html>
+            }
+        },
+        PAGE_BYTES_MAX,
     )
+    .map(|markup| markup.into_string())
 }
 
 const STYLE: &str = r#"
@@ -124,11 +160,12 @@ details { margin: 1rem 0; }
 summary { cursor: pointer; }
 "#;
 
-pub fn message(message: &str) -> String {
-    page("runboard", &format!("<p>{}</p>", escape(message)), false)
+pub fn message(message: &str) -> RenderResult<String> {
+    let body = html! { <p>{message}</p> }?;
+    page("runboard", body.as_str(), false)
 }
 
-pub fn chart(title: &str, series: &[Series]) -> String {
+pub fn chart(title: &str, series: &[Series]) -> RenderResult<String> {
     let mut low_x = f64::INFINITY;
     let mut high_x = f64::NEG_INFINITY;
     let mut low_y = f64::INFINITY;
@@ -181,16 +218,16 @@ pub fn chart(title: &str, series: &[Series]) -> String {
         reduced.push(shown);
     }
     if !low_x.is_finite() {
-        return format!("<p>No points for {} on this axis.</p>", escape(title));
+        return html! { <p>"No points for "{title}" on this axis."</p> }.map(|markup| markup.into_string());
     }
     let span_x = (high_x / 2.0 - low_x / 2.0).max(f64::MIN_POSITIVE);
     let span_y = (high_y / 2.0 - low_y / 2.0).max(f64::MIN_POSITIVE);
-    let mut paths = String::new();
-    let mut legend = String::new();
+    let mut lines = Vec::new();
     for (index, points) in reduced.iter().enumerate() {
         let hash = series[index].label.bytes().fold(2166136261u32, |hash, byte| {
             (hash ^ u32::from(byte)).wrapping_mul(16777619)
         });
+        // Only this bounded numeric hash supplies the legend's CSS colour.
         let colour = format!("hsl({},65%,36%)", hash % 360);
         let mut path = String::new();
         for (x, y) in points {
@@ -198,13 +235,8 @@ pub fn chart(title: &str, series: &[Series]) -> String {
             let py = 180.0 - (y / 2.0 - low_y / 2.0) / span_y * 180.0;
             let _ = write!(path, "{px:.2},{py:.2} ");
         }
-        let _ = write!(paths, "<polyline fill=\"none\" stroke=\"{colour}\" stroke-width=\"1.5\" vector-effect=\"non-scaling-stroke\" points=\"{path}\"/>");
         let last = points.last().map(|point| number(point.1)).unwrap_or_else(|| "–".into());
-        let _ = write!(
-            legend,
-            "<span style=\"color:{colour}\">{}: {last}</span>",
-            escape(&series[index].label)
-        );
+        lines.push((colour, path, &series[index].label, last));
     }
     let key = encode(&format!(
         "{title}|{}",
@@ -214,7 +246,67 @@ pub fn chart(title: &str, series: &[Series]) -> String {
             .collect::<Vec<_>>()
             .join("|")
     ));
-    format!("<figure data-key=\"{key}\"><figcaption>{} <span class=\"dim\">· {} to {}</span></figcaption><div class=\"legend\">{legend}</div><svg class=\"chart\" role=\"img\" width=\"900\" height=\"180\" style=\"aspect-ratio:5/1;height:auto\" preserveAspectRatio=\"none\" aria-label=\"{}\" viewBox=\"0 0 900 180\" data-low=\"{low_x}\" data-high=\"{high_x}\">{paths}</svg><div class=\"actions\"><span class=\"dim\">x: {} to {} · wheel to zoom, drag to pan</span><button type=\"button\" data-reset>Reset zoom</button></div><output></output></figure>", escape(title), number(low_y), number(high_y), escape(title), number(low_x), number(high_x))
+    let legend = component(|output| {
+        output.each(&lines, |output, (colour, _, label, last)| {
+            output.trusted(TrustedHtml("<span"))?;
+            output.attribute("style", &format!("color:{colour}"))?;
+            output.trusted(TrustedHtml(">"))?;
+            output.text(label)?;
+            output.text(": ")?;
+            output.text(last)?;
+            output.trusted(TrustedHtml("</span>"))
+        })
+    });
+    let paths = component(|output| {
+        output.each(&lines, |output, (colour, path, _, _)| {
+            html! { output,
+                <polyline
+                    fill="none"
+                    stroke=colour
+                    stroke-width="1.5"
+                    vector-effect="non-scaling-stroke"
+                    points=path
+                />
+            }
+        })
+    });
+    render_scope_with_limit(
+        |output| {
+            html! { output,
+                <figure data-key=key>
+                    <figcaption>
+                        {title}" "<span class="dim">"· "{number(low_y)}" to "{number(high_y)}</span>
+                    </figcaption>
+                    <div class="legend">{legend}</div>
+                    <svg
+                        class="chart"
+                        role="img"
+                        width="900"
+                        height="180"
+                        style="aspect-ratio:5/1;height:auto"
+                        preserveAspectRatio="none"
+                        aria-label=title
+                        viewBox="0 0 900 180"
+                        data-low=low_x
+                        data-high=high_x
+                    >
+                        {paths}
+                    </svg>
+                    <div class="actions">
+                        <span class="dim">
+                            "x: "{number(low_x)}" to "{number(high_x)}" · wheel to zoom, drag to pan"
+                        </span>
+                        <button type="button" data-reset>
+                            "Reset zoom"
+                        </button>
+                    </div>
+                    <output></output>
+                </figure>
+            }
+        },
+        PAGE_BYTES_MAX,
+    )
+    .map(|markup| markup.into_string())
 }
 
 const SCRIPT: &str = r#"
@@ -388,6 +480,27 @@ setInterval(() => {
 mod tests {
     use super::*;
     #[test]
+    fn page_scope_preserves_offline_behavior_and_rejects_partial_documents() {
+        let live = page("<title>", "<p>trusted fragment</p>", false).unwrap();
+        assert!(live.contains("<title>&lt;title&gt; · runboard</title>"));
+        assert!(live.contains("<p>trusted fragment</p>"));
+        assert!(live.contains("<nav>"));
+        assert!(live.contains("new EventSource('/events')"));
+        let offline = page("report", "", true).unwrap();
+        assert!(!offline.contains("<nav>"));
+        assert!(!offline.contains("new EventSource"));
+        assert!(offline.contains("function show_range"));
+        assert_eq!(
+            page("bad\0title", "", false),
+            Err(rstml_ssr::RenderError::NullCharacter)
+        );
+        assert_eq!(
+            page("large", &"x".repeat(PAGE_BYTES_MAX as usize), false),
+            Err(rstml_ssr::RenderError::OutputLimit)
+        );
+    }
+
+    #[test]
     fn escapes_and_charts_extreme_values() {
         assert_eq!(escape("<script>\"&"), "&lt;script&gt;&quot;&amp;");
         assert_eq!(encode("a/b &"), "a%2Fb%20%26");
@@ -397,7 +510,8 @@ mod tests {
                 label: "<run>".into(),
                 points: vec![(-1e308, -1e308), (1e308, 1e308), (2.0, f64::NAN)],
             }],
-        );
+        )
+        .unwrap();
         assert!(!page.contains("NaN"));
         assert!(!page.contains("inf"));
         assert!(page.contains("&lt;metric&gt;"));
@@ -415,7 +529,8 @@ mod tests {
                 label: "run".into(),
                 points,
             }],
-        );
+        )
+        .unwrap();
         let path = page.split("points=\"").nth(1).unwrap().split('"').next().unwrap();
         let points: Vec<&str> = path.split_whitespace().collect();
         assert!(points.len() <= 1004);

@@ -149,6 +149,7 @@
               pkgs.nats-server
               pkgs.natscli
               pkgs.nixfmt
+              pkgs.leptosfmt
               pythonEnvironment
               pkgs.uv
               pkgs.ruff

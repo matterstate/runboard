@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const SELECTED_MAX: usize = 8;
-const RESPONSE_BYTES_MAX: usize = 32 << 20;
+const RESPONSE_BYTES_MAX: usize = html::PAGE_BYTES_MAX as usize;
 const PAGE_SIZE: usize = 50;
 
 pub struct Project {
@@ -225,18 +225,39 @@ pub struct Response {
 }
 
 impl Response {
-    fn html(body: String) -> Self {
-        Self {
-            status: 200,
-            content_type: "text/html; charset=utf-8",
-            body: body.into_bytes(),
-            attachment: None,
+    fn html(body: rstml_ssr::RenderResult<String>) -> Self {
+        match body {
+            Ok(body) => Self {
+                status: 200,
+                content_type: "text/html; charset=utf-8",
+                body: body.into_bytes(),
+                attachment: None,
+            },
+            Err(error) => Self::error(
+                if error == rstml_ssr::RenderError::OutputLimit {
+                    413
+                } else {
+                    500
+                },
+                &error.to_string(),
+            ),
         }
     }
     pub fn error(status: u16, error: &str) -> Self {
-        let mut response = Self::html(html::message(error));
-        response.status = status;
-        response
+        match html::message(error) {
+            Ok(body) => Self {
+                status,
+                content_type: "text/html; charset=utf-8",
+                body: body.into_bytes(),
+                attachment: None,
+            },
+            Err(_) => Self {
+                status,
+                content_type: "text/plain; charset=utf-8",
+                body: b"Unable to render error response".to_vec(),
+                attachment: None,
+            },
+        }
     }
 }
 
@@ -494,7 +515,9 @@ pub fn route(settings: &Settings, target: &str) -> Response {
         "/report" => match selection(settings, &query.all("run")) {
             Ok(selected) => {
                 let mut response = Response::html(comparison(&selected, &query, true));
-                response.attachment = Some("runs.html");
+                if response.status == 200 {
+                    response.attachment = Some("runs.html");
+                }
                 response
             }
             Err(error) => Response::error(400, &error),
@@ -531,7 +554,7 @@ pub fn export(settings: &Settings) -> Result<(), String> {
     let path = settings.export.as_ref().ok_or("export path missing")?;
     let ids: Vec<&str> = settings.selected.iter().map(String::as_str).collect();
     let selected = selection(settings, &ids)?;
-    let body = comparison(&selected, &Query(Vec::new()), true);
+    let body = comparison(&selected, &Query(Vec::new()), true).map_err(|error| error.to_string())?;
     if body.len() > RESPONSE_BYTES_MAX {
         return Err("report exceeds 32 MiB".into());
     }
@@ -551,7 +574,7 @@ pub fn export(settings: &Settings) -> Result<(), String> {
     Ok(())
 }
 
-fn index(settings: &Settings, query: &Query) -> String {
+fn index(settings: &Settings, query: &Query) -> rstml_ssr::RenderResult<String> {
     let mut runs = entries(settings);
     let capped = runs.len() == 4096;
     let status_counts = ["running", "slow", "failed", "completed"]
@@ -999,7 +1022,7 @@ fn benchmark_metrics(entry: &Entry<'_>) -> Result<Vec<Summary>, String> {
     Ok(metrics)
 }
 
-fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> String {
+fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> rstml_ssr::RenderResult<String> {
     let logs: Vec<Vec<Record>> = selected.iter().map(records).collect();
     let benchmarks = summary_table(selected);
     let mut body = if offline {
@@ -1080,9 +1103,9 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> String {
                 points: curve(log, &metric, query),
             })
             .collect();
-        body.push_str(&html::chart(&metric, &series));
+        body.push_str(&html::chart(&metric, &series)?);
         if query.get("group") == "1" {
-            body.push_str(&seed_groups(selected, &series));
+            body.push_str(&seed_groups(selected, &series)?);
         }
     }
     if !offline {
@@ -1103,7 +1126,7 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> String {
     html::page(if offline { "Run report" } else { "Compare runs" }, &body, offline)
 }
 
-fn seed_groups(selected: &[Entry<'_>], series: &[Series]) -> String {
+fn seed_groups(selected: &[Entry<'_>], series: &[Series]) -> rstml_ssr::RenderResult<String> {
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, entry) in selected.iter().enumerate() {
         let group = entry.field("group");
@@ -1221,12 +1244,12 @@ fn seed_groups(selected: &[Entry<'_>], series: &[Series]) -> String {
     }
     body.push_str("</table><p>Aggregation uses distinct declared seeds at exactly shared x values; standard error assumes independent seeds.</p>");
     if !curves.is_empty() {
-        body.push_str(&html::chart("Seed group mean ± sample standard deviation", &curves));
+        body.push_str(&html::chart("Seed group mean ± sample standard deviation", &curves)?);
     }
-    body
+    Ok(body)
 }
 
-fn run_page(settings: &Settings, entry: &Entry<'_>, query: &Query) -> String {
+fn run_page(settings: &Settings, entry: &Entry<'_>, query: &Query) -> rstml_ssr::RenderResult<String> {
     let selected = std::slice::from_ref(entry);
     let log = records(entry);
     let mut body = String::new();
@@ -1299,7 +1322,7 @@ fn run_page(settings: &Settings, entry: &Entry<'_>, query: &Query) -> String {
                 label: entry.id(),
                 points: curve(&log, &metric, query),
             }],
-        ));
+        )?);
     }
     if !log.is_empty() {
         body.push_str(&benchmarks);
@@ -1465,7 +1488,7 @@ fn queue_body(settings: &Settings) -> Result<Option<String>, String> {
     Ok(None)
 }
 
-fn jobs(settings: &Settings, query: &Query) -> String {
+fn jobs(settings: &Settings, query: &Query) -> rstml_ssr::RenderResult<String> {
     let runs = entries(settings);
     let mut body = format!(
         "<details><summary>Queue filters · {}{}</summary><form class=\"filters\"><fieldset><legend>Queue filters</legend><label>Group <input name=\"group\" value=\"{}\"></label><label>Show completed <input type=\"checkbox\" name=\"completed\" value=\"1\" {}></label><button>Filter</button></fieldset></form></details>",
@@ -1598,7 +1621,7 @@ fn jobs(settings: &Settings, query: &Query) -> String {
     html::page("Queue", &body, false)
 }
 
-fn devices(settings: &Settings, query: &Query) -> String {
+fn devices(settings: &Settings, query: &Query) -> rstml_ssr::RenderResult<String> {
     let mut body = format!(
         "<details><summary>Device filters · {} active</summary><form class=\"filters\"><fieldset><legend>Device filters</legend>{}<button>Filter</button></fieldset></form></details>",
         ["project", "host", "device"].iter().filter(|key| !query.get(key).is_empty()).count(),
@@ -1672,7 +1695,7 @@ fn devices(settings: &Settings, query: &Query) -> String {
                         label: title.clone(),
                         points,
                     }],
-                ));
+                )?);
             }
         }
     }
@@ -1684,6 +1707,22 @@ mod tests {
     use super::*;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn rendering_errors_are_http_failures_without_partial_markup() {
+        let limit = Response::html(Err(rstml_ssr::RenderError::OutputLimit));
+        assert_eq!(limit.status, 413);
+        assert!(String::from_utf8(limit.body)
+            .unwrap()
+            .contains("HTML output limit exceeded"));
+        let invalid = Response::html(Err(rstml_ssr::RenderError::NullCharacter));
+        assert_eq!(invalid.status, 500);
+        let fallback = Response::error(500, "bad\0text");
+        assert_eq!(fallback.status, 500);
+        assert_eq!(fallback.content_type, "text/plain; charset=utf-8");
+        assert!(!fallback.body.contains(&0));
+    }
+
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
     struct Fixture {

@@ -10,6 +10,7 @@
 !/flake.*
 !/Cargo.*
 !/rustfmt.toml
+!/leptosfmt.toml
 !/rust-analyzer.toml
 !/.cargo/config.toml
 !/.cargo/audit.toml
