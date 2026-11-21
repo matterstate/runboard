@@ -1,0 +1,5 @@
+---
+source: src/app.rs
+expression: main
+---
+<h1>Devices</h1><details><summary>Device filters · 1 active</summary><form class="filters"><fieldset><legend>Device filters</legend><label>Project<input name="project" value=""></label><label>Host<input name="host" value="atlas"></label><label>Device<input name="device" value=""></label><button>Filter</button></fieldset></form></details>

@@ -237,7 +237,7 @@ filesystem sandbox. The server never writes producer files.
 nix develop
 cargo test --all-targets
 cargo clippy --all-targets -- -D warnings
-leptosfmt --config-file leptosfmt.toml src/html.rs
+leptosfmt --config-file leptosfmt.toml src/app.rs src/html.rs
 cargo fmt --all
 nixfmt flake.nix nix/module.nix
 taplo format Cargo.toml rustfmt.toml
@@ -255,11 +255,17 @@ ast-grep scan
 ast-grep test
 ```
 
-The shared page layout and SVG charts use rstml-ssr 0.4 with fallible rendering
-and a 32 MiB document budget. Route-specific tables and forms still use escaped
-fragment builders in `src/app.rs`; those are the remaining template migration
-boundary. Only application-generated fragments and bundled scripts/styles bypass
-rstml-ssr escaping.
+All dashboard pages, forms, tables and charts use rstml-ssr 0.4. Page components
+write directly into one fallible output scope with a shared 32 MiB document
+budget, including charts and nested tables. Producer text and form values are
+escaped by the renderer; page bodies cannot accept raw HTML strings. Bundled
+scripts/styles and literal legend span tags use audited trusted markup. Legend
+colours come only from a bounded numeric hash.
+
+Route snapshots cover the run index, run detail, comparisons, offline reports,
+queue, devices and input diagnostics. Only timestamps and relative ages are
+normalized. Run `cargo test dashboard_route_snapshots` to check them; review
+snapshot diffs before accepting updates with `INSTA_UPDATE=always`.
 
 The flake uses flake-parts, devshell, Crane and rust-overlay. Targets are x86-64
 Linux, ARM64 Linux and ARM64 macOS. The shell matches the Conform formatters.

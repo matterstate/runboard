@@ -17,6 +17,7 @@
 !/.github/workflows/*.yml
 
 !/src/**/*.rs
+!/src/snapshots/*.snap
 !/nix/**/*.nix
 !/examples/**/*.rs
 !/examples/*.py

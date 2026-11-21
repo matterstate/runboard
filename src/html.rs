@@ -9,14 +9,6 @@ pub struct Series {
     pub points: Vec<(f64, f64)>,
 }
 
-pub fn escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 pub fn encode(value: &str) -> String {
     let mut output = String::new();
     for byte in value.bytes() {
@@ -45,7 +37,7 @@ pub fn number(value: f64) -> String {
         .to_string()
 }
 
-pub fn age(time: SystemTime) -> String {
+pub fn age(output: &mut rstml_ssr::Output, time: SystemTime) -> RenderResult {
     let seconds = SystemTime::now()
         .duration_since(time)
         .map(|value| value.as_secs())
@@ -60,7 +52,7 @@ pub fn age(time: SystemTime) -> String {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    format!("<time data-time=\"{timestamp}\">{label}</time>")
+    html! { output, <time data-time=timestamp>{label}</time> }
 }
 
 pub fn now() -> f64 {
@@ -85,9 +77,11 @@ fn Navigation() -> RenderResult {
     }
 }
 
-/// Body markup comes only from the application's escaped fragment builders.
-/// Producer text must never be passed as body markup.
-pub fn page(title: &str, body: &str, offline: bool) -> RenderResult<String> {
+pub fn page(
+    title: &str,
+    body: impl FnOnce(&mut rstml_ssr::Output) -> RenderResult,
+    offline: bool,
+) -> RenderResult<String> {
     let live = if offline { "" } else { LIVE_SCRIPT };
     let navigation = component(|output| {
         if !offline {
@@ -110,7 +104,7 @@ pub fn page(title: &str, body: &str, offline: bool) -> RenderResult<String> {
                     <body>
                         {navigation} <main>
                             <h1>{title}</h1>
-                            {TrustedHtml(body)}
+                            {|output| body(output)}
                         </main> <script>{TrustedHtml(SCRIPT)}{TrustedHtml(live)}</script>
                     </body>
                 </html>
@@ -161,11 +155,10 @@ summary { cursor: pointer; }
 "#;
 
 pub fn message(message: &str) -> RenderResult<String> {
-    let body = html! { <p>{message}</p> }?;
-    page("runboard", body.as_str(), false)
+    page("runboard", |output| html! { output, <p>{message}</p> }, false)
 }
 
-pub fn chart(title: &str, series: &[Series]) -> RenderResult<String> {
+pub fn chart(output: &mut rstml_ssr::Output, title: &str, series: &[Series]) -> RenderResult {
     let mut low_x = f64::INFINITY;
     let mut high_x = f64::NEG_INFINITY;
     let mut low_y = f64::INFINITY;
@@ -218,7 +211,7 @@ pub fn chart(title: &str, series: &[Series]) -> RenderResult<String> {
         reduced.push(shown);
     }
     if !low_x.is_finite() {
-        return html! { <p>"No points for "{title}" on this axis."</p> }.map(|markup| markup.into_string());
+        return html! { output, <p>"No points for "{title}" on this axis."</p> };
     }
     let span_x = (high_x / 2.0 - low_x / 2.0).max(f64::MIN_POSITIVE);
     let span_y = (high_y / 2.0 - low_y / 2.0).max(f64::MIN_POSITIVE);
@@ -270,43 +263,37 @@ pub fn chart(title: &str, series: &[Series]) -> RenderResult<String> {
             }
         })
     });
-    render_scope_with_limit(
-        |output| {
-            html! { output,
-                <figure data-key=key>
-                    <figcaption>
-                        {title}" "<span class="dim">"· "{number(low_y)}" to "{number(high_y)}</span>
-                    </figcaption>
-                    <div class="legend">{legend}</div>
-                    <svg
-                        class="chart"
-                        role="img"
-                        width="900"
-                        height="180"
-                        style="aspect-ratio:5/1;height:auto"
-                        preserveAspectRatio="none"
-                        aria-label=title
-                        viewBox="0 0 900 180"
-                        data-low=low_x
-                        data-high=high_x
-                    >
-                        {paths}
-                    </svg>
-                    <div class="actions">
-                        <span class="dim">
-                            "x: "{number(low_x)}" to "{number(high_x)}" · wheel to zoom, drag to pan"
-                        </span>
-                        <button type="button" data-reset>
-                            "Reset zoom"
-                        </button>
-                    </div>
-                    <output></output>
-                </figure>
-            }
-        },
-        PAGE_BYTES_MAX,
-    )
-    .map(|markup| markup.into_string())
+    html! { output,
+        <figure data-key=key>
+            <figcaption>
+                {title}" "<span class="dim">"· "{number(low_y)}" to "{number(high_y)}</span>
+            </figcaption>
+            <div class="legend">{legend}</div>
+            <svg
+                class="chart"
+                role="img"
+                width="900"
+                height="180"
+                style="aspect-ratio:5/1;height:auto"
+                preserveAspectRatio="none"
+                aria-label=title
+                viewBox="0 0 900 180"
+                data-low=low_x
+                data-high=high_x
+            >
+                {paths}
+            </svg>
+            <div class="actions">
+                <span class="dim">
+                    "x: "{number(low_x)}" to "{number(high_x)}" · wheel to zoom, drag to pan"
+                </span>
+                <button type="button" data-reset>
+                    "Reset zoom"
+                </button>
+            </div>
+            <output></output>
+        </figure>
+    }
 }
 
 const SCRIPT: &str = r#"
@@ -481,35 +468,45 @@ mod tests {
     use super::*;
     #[test]
     fn page_scope_preserves_offline_behavior_and_rejects_partial_documents() {
-        let live = page("<title>", "<p>trusted fragment</p>", false).unwrap();
+        let live = page("<title>", |output| html! { output, <p>"escaped <fragment>"</p> }, false).unwrap();
         assert!(live.contains("<title>&lt;title&gt; · runboard</title>"));
-        assert!(live.contains("<p>trusted fragment</p>"));
+        assert!(live.contains("<p>escaped &lt;fragment&gt;</p>"));
         assert!(live.contains("<nav>"));
         assert!(live.contains("new EventSource('/events')"));
-        let offline = page("report", "", true).unwrap();
+        let offline = page("report", |_| Ok(()), true).unwrap();
         assert!(!offline.contains("<nav>"));
         assert!(!offline.contains("new EventSource"));
         assert!(offline.contains("function show_range"));
         assert_eq!(
-            page("bad\0title", "", false),
+            page("bad\0title", |_| Ok(()), false),
             Err(rstml_ssr::RenderError::NullCharacter)
         );
         assert_eq!(
-            page("large", &"x".repeat(PAGE_BYTES_MAX as usize), false),
+            page(
+                "large",
+                |output| output.text(&"x".repeat(PAGE_BYTES_MAX as usize)),
+                false
+            ),
             Err(rstml_ssr::RenderError::OutputLimit)
         );
     }
 
     #[test]
     fn escapes_and_charts_extreme_values() {
-        assert_eq!(escape("<script>\"&"), "&lt;script&gt;&quot;&amp;");
         assert_eq!(encode("a/b &"), "a%2Fb%20%26");
-        let page = chart(
-            "<metric>",
-            &[Series {
-                label: "<run>".into(),
-                points: vec![(-1e308, -1e308), (1e308, 1e308), (2.0, f64::NAN)],
-            }],
+        let page = page(
+            "chart",
+            |output| {
+                chart(
+                    output,
+                    "<metric>",
+                    &[Series {
+                        label: "<run>".into(),
+                        points: vec![(-1e308, -1e308), (1e308, 1e308), (2.0, f64::NAN)],
+                    }],
+                )
+            },
+            true,
         )
         .unwrap();
         assert!(!page.contains("NaN"));
@@ -523,12 +520,19 @@ mod tests {
         let points = (0..20000)
             .map(|index| (f64::from(index), if index == 9123 { 100.0 } else { 1.0 }))
             .collect();
-        let page = chart(
-            "spike",
-            &[Series {
-                label: "run".into(),
-                points,
-            }],
+        let page = page(
+            "chart",
+            |output| {
+                chart(
+                    output,
+                    "spike",
+                    &[Series {
+                        label: "run".into(),
+                        points,
+                    }],
+                )
+            },
+            true,
         )
         .unwrap();
         let path = page.split("points=\"").nth(1).unwrap().split('"').next().unwrap();
