@@ -246,7 +246,7 @@ cargo test --all-targets
 cargo clippy --all-targets -- -D warnings
 leptosfmt --config-file leptosfmt.toml src/app.rs src/html.rs
 cargo fmt --all
-nixfmt flake.nix nix/module.nix
+nixfmt flake.nix nix/module.nix nix/deployment-test.nix
 taplo format Cargo.toml rustfmt.toml leptosfmt.toml pyproject.toml .cargo/audit.toml
 mdformat --wrap 80 --number README.md
 nix flake check
@@ -292,6 +292,21 @@ target. A failed first activation stops the service because no healthy release
 exists yet. Builds need no GitHub token or inbound deployment port. The first
 release starts after CI passes. Keep deployment disabled for private
 repositories; the pull service uses public HTTPS access.
+
+On x86-64 Linux with KVM available to the Nix builder, run the disposable NixOS
+deployment check:
+
+```sh
+nix build --print-build-logs --no-link .#checks.x86_64-linux.deployment
+```
+
+`nix/deployment-test.nix` boots an isolated guest with the real service module,
+locally built releases and an authenticated NATS broker. It verifies systemd
+credential loading without credentials in process arguments, healthy activation,
+rollback after killing an activation, and shutdown after a failed first
+activation. The test disables the deployment timer and bypasses GitHub polling
+and remote builds; it does not activate services on the host. Linux x86-64 CI
+runs the same check.
 
 Generate synthetic input in a fresh directory with
 `cargo run --example demo -- target/demo`, then serve it with

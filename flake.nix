@@ -125,6 +125,13 @@
               inherit src;
               cargoExtraArgs = "--all";
             };
+          }
+          // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+            deployment = import ./nix/deployment-test.nix {
+              inherit pkgs;
+              module = inputs.self.nixosModules.default;
+              package = runboard;
+            };
           };
           formatter = pkgs.nixfmt;
           devshells.default = {

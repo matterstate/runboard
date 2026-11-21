@@ -32,11 +32,16 @@ jobs:
       - name: Build, test, lint and format Rust
         run: >-
           nix build --print-build-logs --no-link .#checks.${{ matrix.system }}.runboard .#checks.${{ matrix.system }}.clippy .#checks.${{ matrix.system }}.rustfmt
+      - name: Verify deployment in a disposable NixOS VM
+        if: matrix.system == 'x86_64-linux'
+        run: |
+          sudo chmod a+rw /dev/kvm
+          nix build --print-build-logs --no-link .#checks.x86_64-linux.deployment
       - name: Check repository formatting
         if: matrix.system == 'x86_64-linux'
         run: |
           nix develop --command leptosfmt --check --config-file leptosfmt.toml src/app.rs src/html.rs
-          nix develop --command nixfmt --check flake.nix nix/module.nix
+          nix develop --command nixfmt --check flake.nix nix/module.nix nix/deployment-test.nix
           nix develop --command taplo format --check Cargo.toml rustfmt.toml leptosfmt.toml pyproject.toml .cargo/audit.toml
           nix develop --command mdformat --check --wrap 80 --number README.md
           nix develop --command yamlfmt -lint .github/workflows/ci.yml
