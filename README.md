@@ -246,11 +246,14 @@ Read the existing callback history and live Pueue state:
 ./result/bin/runboard --root training=/path/to/project --jobs /path/to/shared/jobs.jsonl --pueue /etc/pueue/pueue.yml
 ```
 
-`--pueue -` uses the default Pueue configuration. Status reads time out after
-two seconds and are cached for five seconds. Alternatively, use
-`--queue <snapshot>` or per-project `reports/queue.json`. Task IDs in metadata
-and project-qualified labels link queue tasks to runs. Dependencies link to
-their tasks. Runboard does not change the queue.
+`--pueue -` uses the default Pueue configuration. Polling combines all active
+tasks with the 64 most recent tasks, so old queue history does not exhaust the 4
+MiB input budget. Recent status takes precedence when a task changes between
+queries. Each query times out after two seconds; results are cached for five
+seconds. Alternatively, use `--queue <snapshot>` or per-project
+`reports/queue.json`. Task IDs in metadata and project-qualified labels link
+queue tasks to runs. Dependencies link to their tasks. Runboard does not change
+the queue.
 
 ![Queue history and live tasks](images/jobs.webp)
 
