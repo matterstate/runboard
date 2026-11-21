@@ -2301,6 +2301,11 @@ for index, value in enumerate(values):
         run.log({"train/loss": 0.5}, step=2)
 with runboard.init(project="sdk", name="path-limit", config={"x" * 189: 1}):
     pass
+with runboard.init(project="resume", name="branch") as run:
+    run.log({"loss": 1, "eval": 0.9}, step=1)
+    run.log({"loss": 4, "abandoned": 99}, step=4)
+with runboard.init(project="resume", name="branch", resume_from=1) as run:
+    run.log({"loss": 0.5}, step=8)
 "#,
             ])
             .output()
@@ -2314,6 +2319,22 @@ with runboard.init(project="sdk", name="path-limit", config={"x" * 189: 1}):
             name: "sdk".into(),
             root,
         }];
+        let resume_root = fixture.root.join(".runboard/resume");
+        let resumed = data::stage(&resume_root, "branch").unwrap();
+        let history = data::training_records(&resumed);
+        assert_eq!(
+            history
+                .iter()
+                .map(|record| record.get("step").unwrap())
+                .collect::<Vec<_>>(),
+            vec![1.0, 8.0]
+        );
+        assert!(data::latest_values(&history).unwrap().get("abandoned").is_none());
+        fixture.settings.projects.push(Project {
+            name: "resume".into(),
+            root: resume_root,
+        });
+        assert!(!fixture.text("/report?run=resume/branch").contains("abandoned"));
         let filtered = fixture.text("/?metric=eval/accuracy&minimum=0.8");
         assert!(filtered.contains("10 matching runs"));
         let compare = fixture.text("/compare?run=sdk/case-0&metric=eval/accuracy");

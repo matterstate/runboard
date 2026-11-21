@@ -267,7 +267,12 @@ pub fn stage(root: &Path, name: &str) -> Option<Stage> {
     stages(root).into_iter().find(|stage| stage.name == name)
 }
 
-fn numeric_record(line: &str) -> Option<Record> {
+enum TrainingRecord {
+    Observation(Record),
+    Resume(u32),
+}
+
+fn training_record(line: &str) -> Option<TrainingRecord> {
     if !line.trim_start().starts_with('{') || line.len() > 64 << 10 {
         return None;
     }
@@ -275,11 +280,24 @@ fn numeric_record(line: &str) -> Option<Record> {
     if text(&pairs, "monitor").is_some() {
         return None;
     }
+    if let Some(event) = text(&pairs, "runboard.event") {
+        return match event {
+            "resume" => {
+                let step = number(&pairs, "step")?;
+                if step.is_finite() && (0.0..=u32::MAX as f64).contains(&step) && step.fract() == 0.0 {
+                    Some(TrainingRecord::Resume(step as u32))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+    }
     let numbers = pairs.into_iter().filter_map(|(path, scalar)| match scalar {
         Scalar::Number(value) if value.is_finite() => Some((path, value)),
         _ => None,
     });
-    Some(Record(numbers.collect()))
+    Some(TrainingRecord::Observation(Record(numbers.collect())))
 }
 
 /// The last `bytes_max` bytes of a file as text, starting at a line boundary.
@@ -333,13 +351,24 @@ pub fn training_records(stage: &Stage) -> Vec<Record> {
 fn records_from_log(log: &str) -> Vec<Record> {
     let mut records: Vec<Record> = Vec::new();
     let mut merge_adjacent = true;
+    let mut checkpoint_step_max: Option<u32> = None;
     for line in log.lines().rev() {
         if records.len() == RECORDS_MAX {
             break;
         }
-        let Some(record) = numeric_record(line) else { continue };
+        let record = match training_record(line) {
+            Some(TrainingRecord::Observation(record)) => record,
+            Some(TrainingRecord::Resume(step)) => {
+                checkpoint_step_max = Some(checkpoint_step_max.map_or(step, |previous| previous.min(step)));
+                continue;
+            }
+            None => continue,
+        };
         let Some(step) = record.get("step") else { continue };
         if step < 0.0 || step.fract() != 0.0 {
+            continue;
+        }
+        if checkpoint_step_max.is_some_and(|maximum| step > f64::from(maximum)) {
             continue;
         }
         if let Some(last) = records.last_mut() {
@@ -734,6 +763,55 @@ mod tests {
         assert_eq!(last.get("train/gradient"), Some(2.0));
         assert_eq!(last.get("old"), None);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_attempts_agree_with_checkpoint_prefix_reference() {
+        use std::collections::BTreeMap;
+        for checkpoint_first in 0..=6_u32 {
+            for checkpoint_second in 0..=8_u32 {
+                for jump in [false, true] {
+                    let mut log = String::new();
+                    let mut expected: BTreeMap<u32, BTreeMap<String, f64>> = BTreeMap::new();
+                    for step in 1..=6_u32 {
+                        let mut values = BTreeMap::from([
+                            ("step".to_owned(), f64::from(step)),
+                            ("loss".to_owned(), f64::from(step)),
+                        ]);
+                        if step == 3 {
+                            values.insert("eval".into(), 0.8);
+                        }
+                        log.push_str(&serde_json::to_string(&values).unwrap());
+                        log.push('\n');
+                        expected.insert(step, values);
+                    }
+                    for (checkpoint, step) in [
+                        (checkpoint_first, if jump { 8 } else { checkpoint_first }),
+                        (checkpoint_second, 10),
+                    ] {
+                        expected.retain(|step, _| *step <= checkpoint);
+                        log.push_str(
+                            &serde_json::json!({
+                                "runboard":{"event":"resume"}, "step":checkpoint
+                            })
+                            .to_string(),
+                        );
+                        log.push('\n');
+                        let loss = 100.0 + f64::from(step);
+                        log.push_str(&serde_json::json!({"step":step,"loss":loss}).to_string());
+                        log.push('\n');
+                        let values = expected.entry(step).or_default();
+                        values.insert("step".into(), f64::from(step));
+                        values.insert("loss".into(), loss);
+                    }
+                    let actual: BTreeMap<u32, BTreeMap<String, f64>> = records_from_log(&log)
+                        .into_iter()
+                        .map(|record| (record.get("step").unwrap() as u32, record.0.into_iter().collect()))
+                        .collect();
+                    assert_eq!(actual, expected, "{log}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -41,10 +41,10 @@ with runboard.init(project="mnist", config={"learning_rate": 0.001}) as run:
 
 Runs are created under `.runboard/<project>/reports/` in the working directory.
 View these with `runboard --root .runboard/mnist`. IDs are generated unless a
-`name` is supplied; existing names cannot be reopened. Normal context exit
-records success, exceptions record failure, and KeyboardInterrupt records
-cancellation. Abrupt termination cannot reliably record an outcome. Freshness is
-still inferred from writes, not proof that a process is alive.
+`name` is supplied; reopening requires an explicit `resume_from` step. Normal
+context exit records success, exceptions record failure, and KeyboardInterrupt
+records cancellation. Abrupt termination cannot reliably record an outcome.
+Freshness is still inferred from writes, not proof that a process is alive.
 
 `log` accepts 1–32 finite Python `int`/`float` metrics and an explicit,
 nondecreasing optimizer step. Convert tensors at an existing reporting boundary;
@@ -55,8 +55,43 @@ parameters in the dashboard. Writes are synchronous and errors propagate; put
 logging outside measured training intervals. The SDK does not capture the
 process environment or commands.
 
-This is a single-attempt prototype: checkpoint resume, background reporting and
-watchdog integration are not implemented. Do not reuse a run name to resume.
+### Checkpoint resume
+
+After restoring a model and optimizer checkpoint, reopen the same run with its
+last completed step:
+
+```python
+with runboard.init(project="mnist", name="experiment", resume_from=100) as run:
+    run.log({"train/loss": 0.3}, step=101)
+```
+
+Use `name="experiment"` when initially creating that run, or persist the
+generated `run.id` alongside the checkpoint. The SDK does not load or verify
+model state. `resume_from` is the caller's explicit declaration of the restored
+checkpoint; it requires an existing run and a step in `[0, 2**32 - 1]`.
+
+Each open has a fresh `run.attempt_id`. Resuming retains observations at or
+before the checkpoint and excludes abandoned later steps, even when logging
+restarts beyond the previous last step. Raw history is append-only, including
+incomplete records left by a crash. Attempt boundaries are JSON records under
+the reserved `runboard` namespace, not metric observations. Finish records
+retain each attempt's exit code; an attempt without a finish record has an
+unknown outcome, not proof that it is alive. The `_TRAINED` file reflects only
+the current attempt. Within an attempt, steps still cannot decrease.
+Configuration is reused when omitted and must match the original when supplied.
+
+Elapsed time continues from the last recorded observation on the retained
+checkpoint branch. It excludes abandoned work and cannot recover unlogged time
+between that observation and the checkpoint. Resume scans at most the last 16
+MiB; it fails if the checkpoint's elapsed history cannot be recovered from a
+truncated tail. The old outcome is cleared before publishing a resumed attempt.
+
+The SDK uses advisory file locks on Linux and macOS to reject concurrent writers
+to the same run. Locks are released on process exit, including abrupt
+termination; do not delete a run's `.lock` file while a writer is active or
+share one `Run` object between threads. This is local reporting, not a
+distributed writer protocol. Background reporting and watchdog integration
+remain unimplemented.
 
 The Python package uses `uv.lock` and uv2nix. `nix build .#python` builds its
 standalone environment; `nix develop` includes the installed package and pins uv
