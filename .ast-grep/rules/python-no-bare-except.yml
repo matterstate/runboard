@@ -1,0 +1,12 @@
+id: python-no-bare-except
+language: Python
+message: Catch an explicit exception type; do not silently catch process interrupts.
+severity: error
+files:
+  - python/**/*.py
+rule:
+  pattern: |
+    try:
+      $$$BODY
+    except:
+      $$$HANDLER

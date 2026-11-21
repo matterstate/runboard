@@ -18,4 +18,11 @@
 !/src/**/*.rs
 !/nix/**/*.nix
 !/examples/**/*.rs
+!/examples/*.py
+!/examples/TINYGRAD_LICENSE
+!/python/**/*.py
+!/pyproject.toml
+!/uv.lock
+!/sgconfig.yml
+!/.ast-grep/**/*.yml
 !/images/*.webp

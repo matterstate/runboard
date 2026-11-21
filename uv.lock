@@ -1,0 +1,22 @@
+version = 1
+revision = 3
+requires-python = ">=3.11"
+
+[[package]]
+name = "runboard"
+version = "0.1.0"
+source = { editable = "." }
+
+[package.optional-dependencies]
+examples = [
+    { name = "tinygrad" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "tinygrad", marker = "extra == 'examples'", git = "https://github.com/tinygrad/tinygrad?rev=7a829f31f872f883c2233e34ecf25762dffbc44e" }]
+provides-extras = ["examples"]
+
+[[package]]
+name = "tinygrad"
+version = "0.14.0"
+source = { git = "https://github.com/tinygrad/tinygrad?rev=7a829f31f872f883c2233e34ecf25762dffbc44e#7a829f31f872f883c2233e34ecf25762dffbc44e" }

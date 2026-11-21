@@ -1,0 +1,16 @@
+id: python-no-bare-except
+snapshots:
+  ? |
+    try:
+      write()
+    except:
+      pass
+  : labels:
+    - source: |-
+        try:
+          write()
+        except:
+          pass
+      style: primary
+      start: 0
+      end: 29

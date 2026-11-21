@@ -26,6 +26,56 @@ project, name, state, trainer, tag and metric range, with sorting and
 pagination. Run IDs are `project/run`. Select up to eight to compare, export CSV
 or download a standalone HTML report.
 
+## Python training prototype
+
+The optional Python SDK writes the existing file format locally. It needs no
+running dashboard, broker, tinygrad import or network connection:
+
+```python
+import runboard
+
+with runboard.init(project="mnist", config={"learning_rate": 0.001}) as run:
+    run.log({"train/loss": 0.4}, step=100)
+    run.log({"eval/accuracy_pct": 98.5}, step=100)
+```
+
+Runs are created under `.runboard/<project>/reports/` in the working directory.
+View these with `runboard --root .runboard/mnist`. IDs are generated unless a
+`name` is supplied; existing names cannot be reopened. Normal context exit
+records success, exceptions record failure, and KeyboardInterrupt records
+cancellation. Abrupt termination cannot reliably record an outcome. Freshness is
+still inferred from writes, not proof that a process is alive.
+
+`log` accepts 1–32 finite Python `int`/`float` metrics and an explicit,
+nondecreasing optimizer step. Convert tensors at an existing reporting boundary;
+the SDK never calls `.item()` or synchronizes a device. Consecutive same-step
+writes combine keys, with the latest value winning conflicts. Evaluation is
+sparse: log it only when measured. Configuration is bounded JSON data, shown as
+parameters in the dashboard. Writes are synchronous and errors propagate; put
+logging outside measured training intervals. The SDK does not capture the
+process environment or commands.
+
+This is a single-attempt prototype: checkpoint resume, background reporting and
+watchdog integration are not implemented. Do not reuse a run name to resume.
+
+The Python package uses `uv.lock` and uv2nix. `nix build .#python` builds its
+standalone environment; `nix develop` includes the installed package and pins uv
+to the Nix interpreter. To exercise the CPU-only MLPerf-shaped reporting sketch:
+
+```sh
+nix develop
+uv run --locked examples/mlperf_reporting.py
+```
+
+`examples/beautiful_mnist.py` adapts tinygrad's example at revision
+`7a829f31f872f883c2233e34ecf25762dffbc44e`. Its `examples` extra pins that
+master snapshot. Run it with
+`CC=clang DEV=CPU uv run --locked --extra examples examples/beautiful_mnist.py`
+in a compatible tinygrad runtime. It downloads MNIST; it is not part of offline
+CI. The MLPerf sketch uses synthetic scalars, not a benchmark, and does not
+replace MLPerf's compliance logger. Needle's trainers are not modified by this
+prototype.
+
 ## Live updates
 
 The normal command starts a private NATS server on `127.0.0.1:4223`, with
@@ -192,6 +242,16 @@ nixfmt flake.nix nix/module.nix
 taplo format Cargo.toml rustfmt.toml
 mdformat --wrap 80 --number README.md
 nix flake check
+```
+
+Python and structural checks (the same commands run in CI):
+
+```sh
+ruff check python examples/beautiful_mnist.py examples/mlperf_reporting.py
+ruff format --check python examples/beautiful_mnist.py examples/mlperf_reporting.py
+python -m unittest discover -s python/tests
+ast-grep scan
+ast-grep test
 ```
 
 The flake uses flake-parts, devshell, Crane and rust-overlay. Targets are x86-64

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "runboard"
+version = "0.1.0"
+description = "Local file-backed reporting for training loops"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+examples = ["tinygrad"]
+
+[tool.setuptools.packages.find]
+where = ["python"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.uv.sources]
+tinygrad = { git = "https://github.com/tinygrad/tinygrad", rev = "7a829f31f872f883c2233e34ecf25762dffbc44e" }

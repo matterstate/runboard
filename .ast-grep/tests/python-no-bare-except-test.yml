@@ -1,0 +1,13 @@
+id: python-no-bare-except
+valid:
+  - |
+    try:
+      write()
+    except OSError:
+      raise
+invalid:
+  - |
+    try:
+      write()
+    except:
+      pass

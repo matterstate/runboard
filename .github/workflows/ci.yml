@@ -40,6 +40,13 @@ jobs:
           nix develop --command mdformat --check --wrap 80 --number README.md
           nix develop --command yamlfmt -lint .github/workflows/ci.yml
           nix develop --command actionlint
+      - name: Check Python reporting SDK
+        run: |
+          nix develop --command ruff check python examples/beautiful_mnist.py examples/mlperf_reporting.py
+          nix develop --command ruff format --check python examples/beautiful_mnist.py examples/mlperf_reporting.py
+          nix develop --command env PYTHONPATH=python python -m unittest discover -s python/tests
+          nix develop --command ast-grep scan
+          nix develop --command ast-grep test
       - name: Audit dependencies and history
         if: matrix.system == 'x86_64-linux'
         run: |

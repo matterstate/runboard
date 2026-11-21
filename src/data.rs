@@ -283,12 +283,22 @@ pub fn tail(path: &Path, bytes_max: u64) -> Option<String> {
     Some(text[first_newline + 1..].to_string())
 }
 
-/// Training records of a stage in step order. A resumed run appends, so a step can appear twice: the last wins.
+/// Merge adjacent same-step updates; resumed branches replace abandoned future steps.
+fn merge_missing(target: &mut Record, older: Record) {
+    for (key, value) in older.0 {
+        if target.get(&key).is_none() {
+            target.0.push((key, value));
+        }
+    }
+}
+
+/// Training records in step order, with the latest value winning per key.
 pub fn training_records(stage: &Stage) -> Vec<Record> {
     let Some(log) = stage.log_path.as_deref().and_then(|path| tail(path, LOG_BYTES_MAX)) else {
         return Vec::new();
     };
     let mut records: Vec<Record> = Vec::new();
+    let mut merge_adjacent = true;
     for line in log.lines().rev() {
         if records.len() == RECORDS_MAX {
             break;
@@ -298,13 +308,18 @@ pub fn training_records(stage: &Stage) -> Vec<Record> {
         if step < 0.0 || step.fract() != 0.0 {
             continue;
         }
-        if records
-            .last()
-            .and_then(|last| last.get("step"))
-            .is_some_and(|last| last <= step)
-        {
-            continue;
+        if let Some(last) = records.last_mut() {
+            let last_step = last.get("step").expect("records have steps");
+            if last_step == step && merge_adjacent {
+                merge_missing(last, record);
+                continue;
+            }
+            if last_step <= step {
+                merge_adjacent = false;
+                continue;
+            }
         }
+        merge_adjacent = true;
         records.push(record);
     }
     records.reverse();
@@ -313,11 +328,18 @@ pub fn training_records(stage: &Stage) -> Vec<Record> {
 
 pub fn last_record(stage: &Stage) -> Option<Record> {
     let log = tail(stage.log_path.as_deref()?, 256 << 10)?;
-    log.lines().rev().filter_map(numeric_record).find(|record| {
-        record
-            .get("step")
-            .is_some_and(|step| step >= 0.0 && step.fract() == 0.0)
-    })
+    let mut latest: Option<Record> = None;
+    for record in log.lines().rev().filter_map(numeric_record) {
+        let Some(step) = record.get("step").filter(|step| *step >= 0.0 && step.fract() == 0.0) else {
+            continue;
+        };
+        match latest.as_mut() {
+            None => latest = Some(record),
+            Some(last) if last.get("step") == Some(step) => merge_missing(last, record),
+            Some(_) => break,
+        }
+    }
+    latest
 }
 
 pub fn training_time(root: &Path, stage: &Stage, last: Option<&Record>) -> Option<TrainingTime> {
@@ -636,6 +658,32 @@ mod tests {
         let stage = stage(&root, "stage-b").unwrap();
         assert_eq!(last_record(&stage).unwrap().get("validation.f1"), Some(0.8));
         assert_eq!(training_records(&stage).len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn same_step_updates_merge_without_reviving_abandoned_metrics() {
+        let root = fixture();
+        fs::write(
+            root.join("reports/stage-b_train.log"),
+            concat!(
+                "{\"step\":1,\"old\":1}\n{\"step\":1,\"old\":2}\n{\"step\":2}\n",
+                "{\"step\":1,\"loss\":0.8,\"train/gradient\":2}\n",
+                "{\"step\":1,\"loss\":0.4,\"eval/accuracy\":90}\n",
+            ),
+        )
+        .unwrap();
+        let stage = stage(&root, "stage-b").unwrap();
+        let records = training_records(&stage);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].get("loss"), Some(0.4));
+        assert_eq!(records[0].get("train/gradient"), Some(2.0));
+        assert_eq!(records[0].get("eval/accuracy"), Some(90.0));
+        assert_eq!(records[0].get("old"), None);
+        let last = last_record(&stage).unwrap();
+        assert_eq!(last.get("loss"), Some(0.4));
+        assert_eq!(last.get("train/gradient"), Some(2.0));
+        assert_eq!(last.get("old"), None);
         fs::remove_dir_all(root).unwrap();
     }
 
