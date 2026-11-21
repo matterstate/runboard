@@ -8,6 +8,7 @@ use std::time::SystemTime;
 
 pub const STAGES_MAX: usize = 1024;
 pub const RECORDS_MAX: usize = 100_000;
+const LATEST_METRICS_MAX: usize = 128;
 pub const DIRECTORY_ENTRIES_MAX: usize = 200_000;
 pub const LOG_BYTES_MAX: u64 = 16 << 20;
 const METADATA_BYTES_MAX: u64 = 1 << 20;
@@ -26,8 +27,40 @@ pub struct Stage {
     pub progress: Option<Progress>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    Load,
+    Step,
+    Checkpoint,
+    Finalize,
+    Evaluate,
+}
+
+impl Phase {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "load" => Some(Self::Load),
+            "step" => Some(Self::Step),
+            "checkpoint" => Some(Self::Checkpoint),
+            "finalize" => Some(Self::Finalize),
+            "evaluate" => Some(Self::Evaluate),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Load => "load",
+            Self::Step => "step",
+            Self::Checkpoint => "checkpoint",
+            Self::Finalize => "finalize",
+            Self::Evaluate => "evaluate",
+        }
+    }
+}
+
 pub struct Progress {
-    pub phase: String,
+    pub phase: Phase,
     pub step: u64,
     pub pid: u32,
     pub modified: SystemTime,
@@ -212,10 +245,7 @@ pub fn progress(path: &Path) -> Option<Progress> {
         return None;
     }
     let pairs = flatten(&read_text(path, 4096)?).ok()?;
-    let phase = text(&pairs, "phase")?;
-    if !matches!(phase, "load" | "step" | "checkpoint" | "finalize" | "evaluate") {
-        return None;
-    }
+    let phase = Phase::parse(text(&pairs, "phase")?)?;
     let step = number(&pairs, "step")?;
     let pid = number(&pairs, "pid")?;
     if !step.is_finite() || step < 0.0 || step.fract() != 0.0 || step > u32::MAX as f64 {
@@ -225,7 +255,7 @@ pub fn progress(path: &Path) -> Option<Progress> {
         return None;
     }
     Some(Progress {
-        phase: phase.to_string(),
+        phase,
         step: step as u64,
         pid: pid as u32,
         modified: metadata.modified().ok()?,
@@ -297,6 +327,10 @@ pub fn training_records(stage: &Stage) -> Vec<Record> {
     let Some(log) = stage.log_path.as_deref().and_then(|path| tail(path, LOG_BYTES_MAX)) else {
         return Vec::new();
     };
+    records_from_log(&log)
+}
+
+fn records_from_log(log: &str) -> Vec<Record> {
     let mut records: Vec<Record> = Vec::new();
     let mut merge_adjacent = true;
     for line in log.lines().rev() {
@@ -326,20 +360,35 @@ pub fn training_records(stage: &Stage) -> Vec<Record> {
     records
 }
 
-pub fn last_record(stage: &Stage) -> Option<Record> {
-    let log = tail(stage.log_path.as_deref()?, 256 << 10)?;
-    let mut latest: Option<Record> = None;
-    for record in log.lines().rev().filter_map(numeric_record) {
-        let Some(step) = record.get("step").filter(|step| *step >= 0.0 && step.fract() == 0.0) else {
-            continue;
-        };
-        match latest.as_mut() {
-            None => latest = Some(record),
-            Some(last) if last.get("step") == Some(step) => merge_missing(last, record),
-            Some(_) => break,
+/// Latest observations on the retained branch, without filling sparse chart points.
+pub fn latest_values(records: &[Record]) -> Option<Record> {
+    let last = records.last()?;
+    let mut latest = Record(
+        ["step", "time", "seconds"]
+            .into_iter()
+            .filter_map(|name| last.get(name).map(|value| (name.to_owned(), value)))
+            .collect(),
+    );
+    let fields_max = latest.0.len() + LATEST_METRICS_MAX;
+    for record in records.iter().rev() {
+        for (name, value) in &record.0 {
+            if matches!(name.as_str(), "step" | "time" | "seconds") {
+                continue;
+            }
+            if latest.get(name).is_none() {
+                if latest.0.len() == fields_max {
+                    return Some(latest);
+                }
+                latest.0.push((name.clone(), *value));
+            }
         }
     }
-    latest
+    (!latest.0.is_empty()).then_some(latest)
+}
+
+pub fn last_record(stage: &Stage) -> Option<Record> {
+    let log = tail(stage.log_path.as_deref()?, 256 << 10)?;
+    latest_values(&records_from_log(&log))
 }
 
 pub fn training_time(root: &Path, stage: &Stage, last: Option<&Record>) -> Option<TrainingTime> {
@@ -602,7 +651,7 @@ mod tests {
         .unwrap();
         let found = progress(&path).unwrap();
         assert_eq!(found.step, 41);
-        assert_eq!(found.phase, "step");
+        assert_eq!(found.phase, Phase::Step);
         assert_eq!(found.pid, std::process::id());
         fs::write(&path, r#"{"pid":1,"phase":"unknown","step":41}"#).unwrap();
         assert!(progress(&path).is_none());

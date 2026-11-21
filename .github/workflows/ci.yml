@@ -37,7 +37,7 @@ jobs:
         run: |
           nix develop --command leptosfmt --check --config-file leptosfmt.toml src/app.rs src/html.rs
           nix develop --command nixfmt --check flake.nix nix/module.nix
-          nix develop --command taplo format --check Cargo.toml rustfmt.toml leptosfmt.toml .cargo/audit.toml
+          nix develop --command taplo format --check Cargo.toml rustfmt.toml leptosfmt.toml pyproject.toml .cargo/audit.toml
           nix develop --command mdformat --check --wrap 80 --number README.md
           nix develop --command yamlfmt -lint .github/workflows/ci.yml
           nix develop --command actionlint

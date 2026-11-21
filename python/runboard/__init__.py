@@ -17,6 +17,7 @@ class Run:
         self, directory: Path, name: str, config: Mapping[str, object]
     ) -> None:
         self.id = name
+        directory = directory.resolve()
         self.directory = directory
         self._step = -1
         self._closed = False
@@ -26,10 +27,13 @@ class Run:
             raise ValueError("config exceeds 8 KiB")
         pending = [("parameters", json.loads(metadata)["parameters"])]
         fields = 0
+        scalar_bytes = 0
         while pending:
             path, value = pending.pop()
-            if len(path.encode()) > 200 or path.count(".") >= 31:
-                raise ValueError("config field path exceeds 200 bytes or 31 levels")
+            if "\0" in path or len(path.encode()) > 200 or path.count(".") >= 31:
+                raise ValueError(
+                    "config paths require no NUL, at most 200 bytes and 30 dots"
+                )
             if isinstance(value, dict):
                 pending.extend((f"{path}.{key}", item) for key, item in value.items())
             elif isinstance(value, list):
@@ -38,7 +42,33 @@ class Run:
                 )
             else:
                 fields += 1
-                if fields > 128 or len(str(value).encode()) > 1024:
+                if type(value) in (int, float):
+                    try:
+                        number = float(value)
+                    except OverflowError as error:
+                        raise ValueError(
+                            "config numbers must fit finite floats"
+                        ) from error
+                    if not math.isfinite(number):
+                        raise ValueError("config numbers must fit finite floats")
+                    rendered = (
+                        format(number, ".3e")
+                        if number and (abs(number) >= 10000 or abs(number) < 0.001)
+                        else format(number, ".4f").rstrip("0").rstrip(".")
+                    )
+                elif value is None:
+                    rendered = "null"
+                elif isinstance(value, bool):
+                    rendered = str(value).lower()
+                else:
+                    rendered = str(value)
+                if "\0" in rendered:
+                    raise ValueError("config must not contain NUL")
+                value_bytes = len(rendered.encode())
+                scalar_bytes += len(path.encode()) + value_bytes
+                if scalar_bytes > 16 * 1024:
+                    raise ValueError("config exceeds 16 KiB of scalar data")
+                if fields > 128 or value_bytes > 1024:
                     raise ValueError(
                         "config exceeds 128 fields or 1024 bytes per value"
                     )
@@ -87,8 +117,14 @@ class Run:
         if not 1 <= len(metrics) <= 32:
             raise ValueError("log requires 1 to 32 metrics")
         for key, value in metrics.items():
-            if not isinstance(key, str) or not 1 <= len(key.encode()) <= 200:
-                raise ValueError("metric names must contain 1 to 200 UTF-8 bytes")
+            if (
+                not isinstance(key, str)
+                or "\0" in key
+                or not 1 <= len(key.encode()) <= 200
+            ):
+                raise ValueError(
+                    "metric names must be NUL-free and contain 1 to 200 UTF-8 bytes"
+                )
             if key in {"step", "time", "seconds", "monitor"}:
                 raise ValueError(f"reserved metric name: {key}")
             if type(value) not in (int, float):

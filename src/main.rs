@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 const USAGE: &str = "runboard --root [name=]<directory> [--root ...] [--listen address:port]\n\
     [--jobs history.jsonl] [--queue snapshot.json | --pueue config.yml] [--artifacts]\n\
-    [--state-dir directory] [--nats-port port | --nats-url nats://server:port]\n\
+    [--state-dir directory] [--nats-port port | --nats-url nats://server:port | --nats-url-file path]\n\
     [--export report.html --select project/run [--select ...]]";
 
 #[tokio::main(worker_threads = 2)]
@@ -58,6 +58,7 @@ fn arguments(arguments: Vec<String>) -> Result<Settings, String> {
     let mut selected = Vec::new();
     let mut state_dir = None;
     let mut nats_url = None;
+    let mut nats_url_file = None;
     let mut nats_port = None;
     let mut values = arguments.into_iter();
     while let Some(flag) = values.next() {
@@ -110,6 +111,7 @@ fn arguments(arguments: Vec<String>) -> Result<Settings, String> {
                 }
                 nats_url = Some(value);
             }
+            "--nats-url-file" if nats_url_file.is_none() => nats_url_file = Some(PathBuf::from(value)),
             "--nats-port" if nats_port.is_none() => {
                 let port = value.parse::<u16>().map_err(|_| "invalid NATS port")?;
                 if port == 0 {
@@ -126,8 +128,8 @@ fn arguments(arguments: Vec<String>) -> Result<Settings, String> {
     if queue.is_some() && pueue.is_some() {
         return Err("choose --queue or --pueue".into());
     }
-    if nats_url.is_some() && nats_port.is_some() {
-        return Err("choose --nats-url or --nats-port".into());
+    if usize::from(nats_url.is_some()) + usize::from(nats_url_file.is_some()) + usize::from(nats_port.is_some()) > 1 {
+        return Err("choose --nats-url, --nats-url-file or --nats-port".into());
     }
     if export.is_some() && selected.is_empty() {
         return Err("--export requires an explicit --select project/run".into());
@@ -139,6 +141,7 @@ fn arguments(arguments: Vec<String>) -> Result<Settings, String> {
         live: live::Options {
             state_dir,
             url: nats_url,
+            url_file: nats_url_file,
             port: nats_port.unwrap_or(4223),
         },
         projects,
@@ -181,6 +184,8 @@ mod tests {
             vec!["--nats-port", "0"],
             vec!["--nats-port", "4223", "--nats-url", "nats://localhost:4222"],
             vec!["--nats-url", "http://localhost"],
+            vec!["--nats-url-file", "secret", "--nats-port", "4223"],
+            vec!["--nats-url-file", "secret", "--nats-url", "nats://localhost:4222"],
         ] {
             let mut values = vec!["--root".to_string(), named.clone()];
             values.extend(extra.iter().map(|value| value.to_string()));

@@ -1,0 +1,21 @@
+id: rust-typed-input-states
+language: Rust
+message: Parse bounded progress phases and summary directions into enums at the input boundary.
+severity: error
+files:
+  - src/**/*.rs
+rule:
+  kind: field_declaration
+  all:
+    - has:
+        field: name
+        regex: ^(phase|direction)$
+    - has:
+        field: type
+        regex: ^String$
+    - inside:
+        stopBy: end
+        kind: struct_item
+        has:
+          field: name
+          regex: ^(Progress|Summary)$

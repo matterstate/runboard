@@ -23,7 +23,12 @@ let
     root
   ]) settings.roots
   ++ (
-    if settings.natsUrl == null then
+    if settings.natsUrlFile != null then
+      [
+        "--nats-url-file"
+        "%d/nats-url"
+      ]
+    else if settings.natsUrl == null then
       [
         "--nats-port"
         (toString settings.natsPort)
@@ -63,7 +68,12 @@ in
     natsUrl = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "External broker endpoint. Null starts the bundled private broker.";
+      description = "Public external broker endpoint without credentials. Use natsUrlFile for secrets.";
+    };
+    natsUrlFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Runtime path to a secret NATS URL file, loaded through systemd credentials. Do not use a Nix store path.";
     };
     pueueConfig = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
@@ -95,6 +105,18 @@ in
   config = lib.mkIf settings.enable {
     assertions = [
       {
+        assertion = settings.natsUrl == null || !(lib.hasInfix "@" settings.natsUrl);
+        message = "services.runboard.natsUrl must not contain credentials; use natsUrlFile.";
+      }
+      {
+        assertion = settings.natsUrl == null || settings.natsUrlFile == null;
+        message = "Set only one of services.runboard.natsUrl and natsUrlFile.";
+      }
+      {
+        assertion = settings.natsUrlFile == null || !(lib.hasPrefix builtins.storeDir settings.natsUrlFile);
+        message = "services.runboard.natsUrlFile must be a runtime secret, not a Nix store path.";
+      }
+      {
         assertion = settings.roots != [ ];
         message = "services.runboard.roots must contain at least one project.";
       }
@@ -106,6 +128,7 @@ in
       unitConfig.ConditionPathExists = program;
       serviceConfig = {
         ExecStart = "${program} ${lib.escapeShellArgs arguments}";
+        LoadCredential = lib.optional (settings.natsUrlFile != null) "nats-url:${settings.natsUrlFile}";
         DynamicUser = settings.user == null;
         StateDirectory = "runboard";
         StateDirectoryMode = "0700";

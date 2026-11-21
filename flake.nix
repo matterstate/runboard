@@ -79,6 +79,7 @@
               ./Cargo.toml
               ./Cargo.lock
               ./src
+              ./python/runboard
               ./examples
               ./rustfmt.toml
             ];
@@ -93,7 +94,10 @@
             inherit src;
             RUNBOARD_PUEUE = pkgs.lib.getExe' pkgs.pueue "pueue";
             RUNBOARD_NATS_SERVER = pkgs.lib.getExe pkgs.nats-server;
-            nativeCheckInputs = [ pkgs.nats-server ];
+            nativeCheckInputs = [
+              pkgs.nats-server
+              pkgs.python313
+            ];
             cargoArtifacts = null;
             cargoTestExtraArgs = "--all-targets";
             meta = {

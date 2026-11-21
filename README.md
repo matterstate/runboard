@@ -81,6 +81,11 @@ prototype.
 The normal command starts a private NATS server on `127.0.0.1:4223`, with
 JetStream enabled. The Nix package includes the server. Use `--nats-port` to
 choose another port or `--nats-url nats://host:4222` to use an external broker.
+For authenticated endpoints, use `--nats-url-file /run/secrets/nats-url` so the
+URL and credentials do not appear in process arguments. The file must be UTF-8
+and at most 2048 bytes. On NixOS, set `services.runboard.natsUrlFile` to a
+runtime secret path; systemd copies it into the service's credential directory.
+Do not embed credentials in `natsUrl` or put the secret file in the Nix store.
 User/password and token authentication can be supplied in the external URL;
 `tls://` enables TLS. Runboard does not stop an external broker.
 
@@ -167,9 +172,11 @@ and incomplete writes are skipped; the Inputs page reports errors and read
 limits.
 
 Write JSON metadata and queue snapshots by atomic rename. Logs are tailed to 16
-MiB and 100,000 records; charts display up to 32 metrics. Metadata is limited to
-128 fields and 16 KiB of scalar data. Status uses markers and heartbeat age,
-rather than checking local PIDs.
+MiB and 100,000 records; charts display up to 32 metrics. Index filtering uses
+latest observations from the last 256 KiB, retaining up to 128 metrics plus
+step, time and elapsed seconds. Sparse evaluation points remain sparse in
+charts. Metadata is limited to 128 fields and 16 KiB of scalar data. Status uses
+markers and heartbeat age, rather than checking local PIDs.
 
 ## Compare and share
 
@@ -240,7 +247,7 @@ cargo clippy --all-targets -- -D warnings
 leptosfmt --config-file leptosfmt.toml src/app.rs src/html.rs
 cargo fmt --all
 nixfmt flake.nix nix/module.nix
-taplo format Cargo.toml rustfmt.toml
+taplo format Cargo.toml rustfmt.toml leptosfmt.toml pyproject.toml .cargo/audit.toml
 mdformat --wrap 80 --number README.md
 nix flake check
 ```
@@ -278,9 +285,12 @@ Git history for secrets.
 Set `services.runboard.deploy.enable = true` for automatic NixOS deployments. A
 dedicated user checks the public GitHub repository every two minutes and builds
 the exact revision only after its `CI` push workflow succeeds. Activation
-restarts runboard and checks `/healthz`; a failed health check restores the
-previous release. Builds need no GitHub token or inbound deployment port. The
-first release starts after CI passes. Keep deployment disabled for private
+restarts runboard and checks `/healthz`; a failed health check restores the last
+successfully activated release. Building a candidate does not change the running
+release, and interrupted activation retries preserve the healthy rollback
+target. A failed first activation stops the service because no healthy release
+exists yet. Builds need no GitHub token or inbound deployment port. The first
+release starts after CI passes. Keep deployment disabled for private
 repositories; the pull service uses public HTTPS access.
 
 Generate synthetic input in a fresh directory with

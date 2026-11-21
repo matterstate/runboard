@@ -130,6 +130,12 @@ pub fn flatten(text: &str) -> Result<Vec<(String, Scalar)>, String> {
     if !matches!(expect, Expect::CommaOrEnd) {
         return Err("no value".into());
     }
+    if pairs
+        .iter()
+        .any(|(name, value)| name.contains('\0') || matches!(value, Scalar::Text(text) if text.contains('\0')))
+    {
+        return Err("NUL is not representable in report text".into());
+    }
     Ok(pairs)
 }
 
@@ -278,6 +284,49 @@ fn string(bytes: &[u8], at: usize) -> Result<(String, usize), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agrees_with_serde_for_bounded_finite_scalar_combinations() {
+        let values = [
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!(false),
+            serde_json::json!("quote\" slash\\ newline\n λ 🐈"),
+            serde_json::json!(""),
+            serde_json::json!(-1),
+            serde_json::json!(0),
+            serde_json::json!(1e-300),
+            serde_json::json!(1e300),
+        ];
+        for first in &values {
+            for second in &values {
+                let encoded = serde_json::to_string(&serde_json::json!({
+                    "nested": [first, {"leaf": second}], "empty": []
+                }))
+                .unwrap();
+                let reference: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+                let pairs = flatten(&encoded).unwrap();
+                assert_eq!(pairs.len(), 2);
+                for (path, value) in pairs {
+                    let expected = match path.as_str() {
+                        "nested.0" => &reference["nested"][0],
+                        "nested.1.leaf" => &reference["nested"][1]["leaf"],
+                        _ => panic!("unexpected path {path}"),
+                    };
+                    let expected = match expected {
+                        serde_json::Value::Null => Scalar::Null,
+                        serde_json::Value::Bool(value) => Scalar::Bool(*value),
+                        serde_json::Value::Number(value) => Scalar::Number(value.as_f64().unwrap()),
+                        serde_json::Value::String(value) => Scalar::Text(value.clone()),
+                        _ => unreachable!("the reference leaves are scalars"),
+                    };
+                    assert_eq!(value, expected, "{encoded}: {path}");
+                }
+            }
+        }
+        assert!(flatten(r#"{"bad\u0000key":1}"#).is_err());
+        assert!(flatten(r#"{"value":"bad\u0000text"}"#).is_err());
+    }
 
     #[test]
     fn flattens_nested_values() {

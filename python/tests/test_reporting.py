@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,6 +35,29 @@ class ReportingTest(unittest.TestCase):
             )
             with self.assertRaises(RuntimeError):
                 run.log({"loss": 1}, step=3)
+
+    def test_reader_limits_and_working_directory_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, contextlib.chdir(directory):
+            for config in (
+                {"value": 10**400},
+                {"x" * 180: {str(index): 1 for index in range(100)}},
+                {"bad\0key": 1},
+                {"value": "bad\0text"},
+            ):
+                with self.assertRaises(ValueError):
+                    runboard.init(project="invalid", config=config)
+            with runboard.init(project="cwd", name="example") as run:
+                with self.assertRaises(ValueError):
+                    run.log({"bad\0metric": 1}, step=0)
+                elsewhere = Path("elsewhere").resolve()
+                elsewhere.mkdir()
+                # Keep the new cwd through finalization, not just through log().
+                os.chdir(elsewhere)
+                run.log({"loss": 1}, step=0)
+            self.assertEqual(
+                (Path(directory) / ".runboard/cwd/reports/example_TRAINED").read_text(),
+                "train exit 0",
+            )
 
     def test_failures_and_invalid_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory, contextlib.chdir(directory):

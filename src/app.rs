@@ -92,10 +92,10 @@ pub fn live_sources(settings: &Settings, known: &BTreeMap<String, u64>) -> Resul
             if known.get(&source.key) != Some(&revision) {
                 let entry = Entry::read(project, stage);
                 let summaries = entry.summary.as_ref().ok().map(|metrics| metrics.iter().take(32)
-                    .map(|metric| json!({"name":metric.name,"value":metric.value,"unit":metric.unit,"direction":metric.direction})).collect::<Vec<_>>()).unwrap_or_default();
-                source.data = json!({"kind":"run","project":project.name,"run":entry.stage.name,"state":entry.state(),
+                    .map(|metric| json!({"name":metric.name,"value":metric.value,"unit":metric.unit,"direction":metric.direction.as_str()})).collect::<Vec<_>>()).unwrap_or_default();
+                source.data = json!({"kind":"run","project":project.name,"run":entry.stage.name,"state":entry.state().as_str(),
                     "metrics":entry.last.as_ref().map(numbers),"summaries":summaries,
-                    "progress":entry.stage.progress.as_ref().map(|progress| json!({"phase":progress.phase,"step":progress.step}))});
+                    "progress":entry.stage.progress.as_ref().map(|progress| json!({"phase":progress.phase.as_str(),"step":progress.step}))});
             }
             sources.push(source);
         }
@@ -331,6 +331,47 @@ fn decode(value: &str) -> Result<String, String> {
     Ok(decoded)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunState {
+    Running,
+    Slow,
+    Failed,
+    Completed,
+    Cancelled,
+    Recorded,
+    NoData,
+    Stopped,
+}
+
+impl RunState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Slow => "slow",
+            Self::Failed => "failed",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Recorded => "recorded",
+            Self::NoData => "no-data",
+            Self::Stopped => "stopped",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "running" => Some(Self::Running),
+            "slow" => Some(Self::Slow),
+            "failed" => Some(Self::Failed),
+            "completed" => Some(Self::Completed),
+            "cancelled" => Some(Self::Cancelled),
+            "recorded" => Some(Self::Recorded),
+            "no-data" => Some(Self::NoData),
+            "stopped" => Some(Self::Stopped),
+            _ => None,
+        }
+    }
+}
+
 struct Entry<'a> {
     project: &'a Project,
     stage: Stage,
@@ -370,19 +411,19 @@ impl<'a> Entry<'a> {
     fn id(&self) -> String {
         format!("{}/{}", self.project.name, self.stage.name)
     }
-    fn state(&self) -> &'static str {
+    fn state(&self) -> RunState {
         match self.stage.trained.as_deref() {
-            Some("train exit 0") => "completed",
+            Some("train exit 0") => RunState::Completed,
             Some(value) if value.starts_with("cancel") || matches!(value, "train exit 130" | "train exit 143") => {
-                "cancelled"
+                RunState::Cancelled
             }
-            Some(_) => "failed",
+            Some(_) => RunState::Failed,
             None => {
                 if self.stage.log_path.is_none() {
-                    return "recorded";
+                    return RunState::Recorded;
                 }
                 if self.last.is_none() && self.stage.progress.is_none() {
-                    return "no-data";
+                    return RunState::NoData;
                 }
                 let modified = self
                     .stage
@@ -392,9 +433,9 @@ impl<'a> Entry<'a> {
                     .unwrap_or(self.stage.modified);
                 let age = modified.elapsed().map(|value| value.as_secs()).unwrap_or(0);
                 match age {
-                    0..=299 => "running",
-                    300..=1199 => "slow",
-                    _ => "stopped",
+                    0..=299 => RunState::Running,
+                    300..=1199 => RunState::Slow,
+                    _ => RunState::Stopped,
                 }
             }
         }
@@ -589,9 +630,14 @@ pub fn export(settings: &Settings) -> Result<(), String> {
 fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
     let mut runs = entries(settings);
     let capped = runs.len() == 4096;
-    let status_counts: Vec<_> = ["running", "slow", "failed", "completed"]
+    let status_counts: Vec<_> = [RunState::Running, RunState::Slow, RunState::Failed, RunState::Completed]
         .iter()
-        .map(|state| (*state, runs.iter().filter(|entry| entry.state() == *state).count()))
+        .map(|state| {
+            (
+                state.as_str(),
+                runs.iter().filter(|entry| entry.state() == *state).count(),
+            )
+        })
         .collect();
     runs.retain(|entry| {
         (query.get("project").is_empty() || entry.project.name == query.get("project"))
@@ -601,7 +647,7 @@ fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
                     .name
                     .to_lowercase()
                     .contains(&query.get("name").to_lowercase()))
-            && (query.get("state").is_empty() || entry.state() == query.get("state"))
+            && (query.get("state").is_empty() || Some(entry.state()) == RunState::parse(query.get("state")))
             && (query.get("trainer").is_empty() || entry.stage.trainer == query.get("trainer"))
             && (query.get("tag").is_empty()
                 || entry
@@ -628,7 +674,7 @@ fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
             },
             "recent" => b.stage.modified.cmp(&a.stage.modified),
             _ => {
-                let active = |entry: &Entry<'_>| matches!(entry.state(), "running" | "slow");
+                let active = |entry: &Entry<'_>| matches!(entry.state(), RunState::Running | RunState::Slow);
                 active(b)
                     .cmp(&active(a))
                     .then_with(|| b.stage.modified.cmp(&a.stage.modified))
@@ -820,7 +866,7 @@ fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
                                             <a href=format!("/run?run={}", encode(&id))>{id}</a>
                                             {|output| notice(output, &entry.warnings)}
                                         </td>
-                                        <td>{entry.state()}</td>
+                                        <td>{entry.state().as_str()}</td>
                                         <td>
                                             {entry
                                                 .last
@@ -1080,7 +1126,7 @@ fn summary_table(output: &mut Output, selected: &[Entry<'_>], summaries: &[Vec<S
                     let baseline = values[0];
                     html! { output,
                         <tr>
-                            <td>{name}" ("{first.unit}", "{first.direction}")"</td>
+                            <td>{name}" ("{first.unit}", "{first.direction.as_str()}")"</td>
                             {|output| {
                                 output
                                     .each(
@@ -1098,12 +1144,16 @@ fn summary_table(output: &mut Output, selected: &[Entry<'_>], summaries: &[Vec<S
                                                 let class = match delta {
                                                     Some(
                                                         value,
-                                                    ) if metric.direction == "higher" && value > 0.0
-                                                        || metric.direction == "lower" && value < 0.0 => "good",
+                                                    ) if metric.direction == inputs::Direction::Higher
+                                                        && value > 0.0
+                                                        || metric.direction == inputs::Direction::Lower
+                                                            && value < 0.0 => "good",
                                                     Some(
                                                         value,
-                                                    ) if metric.direction == "higher" && value < 0.0
-                                                        || metric.direction == "lower" && value > 0.0 => "warn",
+                                                    ) if metric.direction == inputs::Direction::Higher
+                                                        && value < 0.0
+                                                        || metric.direction == inputs::Direction::Lower
+                                                            && value > 0.0 => "warn",
                                                     _ => "",
                                                 };
                                                 let delta = delta
@@ -1156,12 +1206,17 @@ fn benchmark_metrics(entry: &Entry<'_>) -> Result<Vec<Summary>, String> {
         let variant = if suffix.is_empty() { "base" } else { &suffix[1..] };
         for score in data::panel_scores(&entry.project.root, &system) {
             for (name, value, unit, direction) in [
-                ("accuracy", score.system.accuracy, "fraction", "higher"),
-                ("nll", score.system.nll, "loss", "lower"),
-                ("brier", score.system.brier, "score", "lower"),
-                ("reference/accuracy", score.jev.accuracy, "fraction", "higher"),
-                ("reference/nll", score.jev.nll, "loss", "lower"),
-                ("reference/brier", score.jev.brier, "score", "lower"),
+                ("accuracy", score.system.accuracy, "fraction", inputs::Direction::Higher),
+                ("nll", score.system.nll, "loss", inputs::Direction::Lower),
+                ("brier", score.system.brier, "score", inputs::Direction::Lower),
+                (
+                    "reference/accuracy",
+                    score.jev.accuracy,
+                    "fraction",
+                    inputs::Direction::Higher,
+                ),
+                ("reference/nll", score.jev.nll, "loss", inputs::Direction::Lower),
+                ("reference/brier", score.jev.brier, "score", inputs::Direction::Lower),
             ] {
                 if !value.is_finite() {
                     continue;
@@ -1177,17 +1232,22 @@ fn benchmark_metrics(entry: &Entry<'_>) -> Result<Vec<Summary>, String> {
                     name,
                     value,
                     unit: unit.into(),
-                    direction: direction.into(),
+                    direction,
                 });
             }
         }
         for score in data::jevbench_scores(&entry.project.root, &system) {
             for (name, value, unit, direction) in [
-                ("accuracy", score.accuracy, "fraction", "higher"),
-                ("ece", score.ece, "fraction", "lower"),
-                ("brier", score.brier, "score", "lower"),
-                ("coverage", score.coverage, "fraction", "higher"),
-                ("complete", if score.complete { 1.0 } else { 0.0 }, "boolean", "none"),
+                ("accuracy", score.accuracy, "fraction", inputs::Direction::Higher),
+                ("ece", score.ece, "fraction", inputs::Direction::Lower),
+                ("brier", score.brier, "score", inputs::Direction::Lower),
+                ("coverage", score.coverage, "fraction", inputs::Direction::Higher),
+                (
+                    "complete",
+                    if score.complete { 1.0 } else { 0.0 },
+                    "boolean",
+                    inputs::Direction::None,
+                ),
             ] {
                 if !value.is_finite() {
                     continue;
@@ -1203,7 +1263,7 @@ fn benchmark_metrics(entry: &Entry<'_>) -> Result<Vec<Summary>, String> {
                     name,
                     value,
                     unit: unit.into(),
-                    direction: direction.into(),
+                    direction,
                 });
             }
         }
@@ -1241,8 +1301,8 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> RenderRes
                     </tr>
                     {|output| {
                         for (entry, log) in selected.iter().zip(&logs) {
-                            let latest: Vec<String> = log
-                                .last()
+                            let latest: Vec<String> = data::latest_values(log)
+                                .as_ref()
                                 .map(|record| {
                                     record
                                         .0
@@ -1279,7 +1339,7 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> RenderRes
                             html! { output,
                                 <tr>
                                     <td>{entry.id()}</td>
-                                    <td>{entry.state()}</td>
+                                    <td>{entry.state().as_str()}</td>
                                     <td>
                                         {log
                                             .last()
@@ -1513,7 +1573,7 @@ fn run_page(settings: &Settings, entry: &Entry<'_>, query: &Query) -> RenderResu
         |output| {
             html! { output,
                 <p>
-                    <strong>{entry.state()}</strong>
+                    <strong>{entry.state().as_str()}</strong>
                     " · step "
                     {log
                         .last()
@@ -1532,7 +1592,7 @@ fn run_page(settings: &Settings, entry: &Entry<'_>, query: &Query) -> RenderResu
             if let Some(progress) = &entry.stage.progress {
                 html! { output,
                     <p>
-                        "Producer PID "{progress.pid}" · "{progress.phase}" at step "{progress.step}
+                        "Producer PID "{progress.pid}" · "{progress.phase.as_str()}" at step "{progress.step}
                         " · heartbeat "{|output| html::age(output, progress.modified)}
                     </p>
                 }?;
@@ -1706,7 +1766,7 @@ fn csv(selected: &[Entry<'_>]) -> Result<String, (u16, String)> {
                 csv_field(&metric.name),
                 metric.value,
                 csv_field(&metric.unit),
-                csv_field(&metric.direction)
+                csv_field(metric.direction.as_str())
             );
             if output.len() > RESPONSE_BYTES_MAX {
                 return Err((413, "CSV exceeds 32 MiB".into()));
@@ -2224,6 +2284,53 @@ mod tests {
     }
 
     #[test]
+    fn python_reports_are_consumable_and_sparse_filters_use_latest_observations() {
+        let mut fixture = Fixture::new();
+        let python = std::env::var_os("UV_PYTHON").unwrap_or_else(|| "python3".into());
+        let output = std::process::Command::new(python)
+            .current_dir(&fixture.root)
+            .env("PYTHONPATH", Path::new(env!("CARGO_MANIFEST_DIR")).join("python"))
+            .args([
+                "-c",
+                r#"
+import runboard
+values = [None, True, False, "", "λ" * 512, 0, -1, 10000, 1e-300, 1e300]
+for index, value in enumerate(values):
+    with runboard.init(project="sdk", name=f"case-{index}", config={"value": value}) as run:
+        run.log({"train/loss": 1.0, "eval/accuracy": 0.9}, step=1)
+        run.log({"train/loss": 0.5}, step=2)
+with runboard.init(project="sdk", name="path-limit", config={"x" * 189: 1}):
+    pass
+"#,
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let root = fixture.root.join(".runboard/sdk");
+        for stage in data::stages(&root) {
+            assert!(inputs::metadata(&root, &stage.name).is_ok(), "{}", stage.name);
+        }
+        fixture.settings.projects = vec![Project {
+            name: "sdk".into(),
+            root,
+        }];
+        let filtered = fixture.text("/?metric=eval/accuracy&minimum=0.8");
+        assert!(filtered.contains("10 matching runs"));
+        let compare = fixture.text("/compare?run=sdk/case-0&metric=eval/accuracy");
+        assert!(compare.contains("eval/accuracy: 0.9"));
+        for path in ["/", "/run?run=sdk/case-0", "/report?run=sdk/case-0", "/diagnostics"] {
+            fixture.text(path);
+        }
+        fs::write(
+            fixture.settings.projects[0].root.join("reports/bad_train.log"),
+            "{\"step\":1,\"bad\\u0000metric\":1}\n",
+        )
+        .unwrap();
+        fixture.text("/");
+        assert!(fixture.text("/diagnostics").contains("invalid or partial JSON"));
+    }
+
+    #[test]
     fn dashboard_route_snapshots() {
         let mut fixture = Fixture::new();
         fixture.settings.artifacts = true;
@@ -2596,11 +2703,11 @@ mod tests {
             "{\"step\":1,\"bad\\u0000metric\":2}\n",
         )
         .unwrap();
-        assert!(export(&fixture.settings).is_err());
-        assert!(!invalid.exists());
+        export(&fixture.settings).unwrap();
+        assert!(invalid.exists());
         let response = route(&fixture.settings, "/report?run=a/same");
-        assert_eq!(response.status, 500);
-        assert!(response.attachment.is_none());
+        assert_eq!(response.status, 200);
+        assert!(fixture.text("/diagnostics").contains("invalid or partial JSON"));
         assert!(!response.body.contains(&0));
     }
 }

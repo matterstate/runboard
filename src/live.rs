@@ -20,6 +20,7 @@ pub const CLIENTS_MAX: usize = 64;
 pub struct Options {
     pub state_dir: Option<PathBuf>,
     pub url: Option<String>,
+    pub url_file: Option<PathBuf>,
     pub port: u16,
 }
 
@@ -28,6 +29,7 @@ impl Default for Options {
         Self {
             state_dir: None,
             url: None,
+            url_file: None,
             port: 4223,
         }
     }
@@ -128,13 +130,22 @@ impl Live {
             }
             _ => return Err("invalid consumer.id in state directory".into()),
         };
-        let scope = if settings.live.url.is_some() {
+        let external_url = match &settings.live.url_file {
+            Some(path) => Some(
+                crate::data::read_text(path, 2048)
+                    .ok_or("cannot read NATS URL file (regular UTF-8 file, at most 2048 bytes required)")?
+                    .trim()
+                    .to_owned(),
+            ),
+            None => settings.live.url.clone(),
+        };
+        let scope = if external_url.is_some() {
             project_scope
         } else {
             consumer_id[..16].to_string()
         };
         let mut child = None;
-        let url = match &settings.live.url {
+        let url = match &external_url {
             Some(url) => url.clone(),
             None => {
                 let token_path = directory.join("nats.token");
@@ -177,6 +188,9 @@ impl Live {
                 url
             }
         };
+        if !matches!(url.split_once("://").map(|(scheme, _)| scheme), Some("nats" | "tls")) {
+            return Err("NATS URL must be a nats:// or tls:// endpoint".into());
+        }
         let mut client = None;
         let address = url
             .parse::<async_nats::ServerAddr>()
@@ -210,9 +224,7 @@ impl Live {
             }
             match options.clone().connect(address.clone()).await {
                 Ok(connection) => {
-                    if settings.live.url.is_none()
-                        && connection.server_info().server_name != format!("runboard-{scope}")
-                    {
+                    if external_url.is_none() && connection.server_info().server_name != format!("runboard-{scope}") {
                         return Err("managed NATS port is occupied by another server; choose --nats-port".into());
                     }
                     client = Some(connection);
@@ -569,14 +581,13 @@ mod tests {
     async fn external_mode_reuses_broker_without_owning_its_lifecycle() {
         let (root, settings) = settings();
         let managed = Live::start(&settings).await.unwrap();
-        let url = fs::read_to_string(root.join("state/nats.url")).unwrap();
         let mut external = crate::arguments(vec![
             "--root".into(),
             format!("other={}", root.display()),
             "--state-dir".into(),
             root.join("external").display().to_string(),
-            "--nats-url".into(),
-            url,
+            "--nats-url-file".into(),
+            root.join("state/nats.url").display().to_string(),
         ])
         .unwrap();
         let live = Live::start(&external).await.unwrap();
@@ -585,7 +596,7 @@ mod tests {
         live.shutdown().await;
         drop(live);
         assert!(managed.sidecar_alive().await);
-        external.live.url = None;
+        external.live.url_file = None;
         external.live.port = settings.live.port;
         assert!(Live::start(&external).await.is_err());
         assert!(managed.sidecar_alive().await);

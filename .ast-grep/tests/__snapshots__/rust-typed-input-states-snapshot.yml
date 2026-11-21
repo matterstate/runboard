@@ -1,0 +1,46 @@
+id: rust-typed-input-states
+snapshots:
+  'mod input { struct Summary { pub direction: String } }':
+    labels:
+    - source: 'pub direction: String'
+      style: primary
+      start: 29
+      end: 50
+    - source: direction
+      style: secondary
+      start: 33
+      end: 42
+    - source: String
+      style: secondary
+      start: 44
+      end: 50
+    - source: Summary
+      style: secondary
+      start: 19
+      end: 26
+    - source: 'struct Summary { pub direction: String }'
+      style: secondary
+      start: 12
+      end: 52
+  'struct Progress { pub phase: String }':
+    labels:
+    - source: 'pub phase: String'
+      style: primary
+      start: 18
+      end: 35
+    - source: phase
+      style: secondary
+      start: 22
+      end: 27
+    - source: String
+      style: secondary
+      start: 29
+      end: 35
+    - source: Progress
+      style: secondary
+      start: 7
+      end: 15
+    - source: 'struct Progress { pub phase: String }'
+      style: secondary
+      start: 0
+      end: 37

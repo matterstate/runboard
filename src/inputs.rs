@@ -8,12 +8,38 @@ use std::path::{Component, Path, PathBuf};
 pub type Fields = Vec<(String, Scalar)>;
 pub const ARTIFACT_BYTES_MAX: u64 = 16 << 20;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Higher,
+    Lower,
+    None,
+}
+
+impl Direction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Higher => "higher",
+            Self::Lower => "lower",
+            Self::None => "none",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "higher" => Ok(Self::Higher),
+            "lower" => Ok(Self::Lower),
+            "none" => Ok(Self::None),
+            _ => Err("direction must be higher, lower or none".into()),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Summary {
     pub name: String,
     pub value: f64,
     pub unit: String,
-    pub direction: String,
+    pub direction: Direction,
 }
 
 pub struct Stream {
@@ -96,13 +122,11 @@ pub fn summaries(root: &Path, name: &str) -> Result<Vec<Summary>, String> {
         if !value.is_finite() {
             return Err(format!("{name}: non-finite value"));
         }
-        let direction = json::text(&pairs, &format!("metrics.{name}.direction")).unwrap_or("none");
+        let direction = Direction::parse(json::text(&pairs, &format!("metrics.{name}.direction")).unwrap_or("none"))
+            .map_err(|error| format!("{name}: {error}"))?;
         let unit = json::text(&pairs, &format!("metrics.{name}.unit")).unwrap_or("");
         if unit.len() > 64 {
             return Err(format!("{name}: unit exceeds 64 bytes"));
-        }
-        if !matches!(direction, "higher" | "lower" | "none") {
-            return Err(format!("{name}: direction must be higher, lower or none"));
         }
         if summaries.len() == 128 {
             return Err("summary exceeds 128 metrics".into());
@@ -114,7 +138,7 @@ pub fn summaries(root: &Path, name: &str) -> Result<Vec<Summary>, String> {
             name: name.into(),
             value: *value,
             unit: unit.into(),
-            direction: direction.into(),
+            direction,
         });
     }
     if summaries.is_empty() {

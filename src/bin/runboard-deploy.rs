@@ -40,7 +40,12 @@ fn run() -> Result<bool, String> {
             let revision = head.split_whitespace().next().ok_or("missing remote revision")?;
             validate_revision(revision)?;
             match read_state(&state.join("deployed")) {
-                Ok(deployed) if deployed == revision => return Ok(false),
+                Ok(deployed) if deployed == revision => {
+                    let healthy = healthy_release(&state)?.ok_or("missing healthy release")?;
+                    if store_release(&state.join("current")).is_ok_and(|current| current == healthy) {
+                        return Ok(false);
+                    }
+                }
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.to_string()),
@@ -80,6 +85,7 @@ fn run() -> Result<bool, String> {
             let candidate = store_release(&release)?;
             let current = store_release(&state.join("current")).ok();
             let previous = store_release(&state.join("previous")).ok();
+            let healthy = healthy_release(&state)?;
             let mut count = 0_u32;
             for entry in fs::read_dir(&state).map_err(|error| error.to_string())? {
                 count += 1;
@@ -89,21 +95,23 @@ fn run() -> Result<bool, String> {
                 let entry = entry.map_err(|error| error.to_string())?;
                 if entry.file_name().to_string_lossy().starts_with("release-") {
                     let target = store_release(&entry.path())?;
-                    if target != candidate && Some(&target) != current.as_ref() && Some(&target) != previous.as_ref() {
+                    if target != candidate
+                        && Some(&target) != current.as_ref()
+                        && Some(&target) != previous.as_ref()
+                        && Some(&target) != healthy.as_ref()
+                    {
                         fs::remove_file(entry.path()).map_err(|error| error.to_string())?;
                     }
                 }
             }
-            if let Some(current) = current {
-                replace_link(&state.join("previous"), &current)?;
-            }
-            replace_link(&state.join("current"), &candidate)?;
             Ok(true)
         }
         "activate" => {
             let revision = read_state(&state.join("target")).map_err(|error| error.to_string())?;
             validate_revision(&revision)?;
-            store_release(&state.join("current"))?;
+            let candidate = store_release(&state.join(format!("release-{revision}")))?;
+            let previous = healthy_release(&state)?;
+            switch_release(&state, &candidate, previous.as_deref())?;
             let health_url = environment("DEPLOY_HEALTH_URL")?;
             let restart = command(Command::new("systemctl").args(["restart", "runboard.service"]));
             if restart.is_ok() && healthy(&health_url) {
@@ -111,7 +119,13 @@ fn run() -> Result<bool, String> {
                 eprintln!("Deploy: activated {revision}");
                 return Ok(true);
             }
-            let previous = store_release(&state.join("previous"))?;
+            let Some(previous) = previous else {
+                command(Command::new("systemctl").args(["stop", "runboard.service"]))?;
+                fs::remove_file(state.join("current")).map_err(|error| error.to_string())?;
+                return Err(format!(
+                    "{revision} failed health checks; no healthy release to restore"
+                ));
+            };
             replace_link(&state.join("current"), &previous)?;
             command(Command::new("systemctl").args(["restart", "runboard.service"]))?;
             if !healthy(&health_url) {
@@ -121,6 +135,25 @@ fn run() -> Result<bool, String> {
         }
         _ => Err("expected check, build or activate".into()),
     }
+}
+
+fn healthy_release(state: &Path) -> Result<Option<PathBuf>, String> {
+    let revision = match read_state(&state.join("deployed")) {
+        Ok(revision) => revision,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    validate_revision(&revision)?;
+    store_release(&state.join(format!("release-{revision}"))).map(Some)
+}
+
+fn switch_release(state: &Path, candidate: &Path, healthy: Option<&Path>) -> Result<(), String> {
+    if let Some(healthy) = healthy {
+        if healthy != candidate {
+            replace_link(&state.join("previous"), healthy)?;
+        }
+    }
+    replace_link(&state.join("current"), candidate)
 }
 
 fn environment(name: &str) -> Result<String, String> {
@@ -293,6 +326,29 @@ mod tests {
         assert!(!identifier(""));
         assert!(!identifier("main?rev=other"));
         assert!(store_release(Path::new("/bin/sh")).is_err());
+    }
+
+    #[test]
+    fn activation_retries_preserve_the_healthy_release() {
+        let directory = std::env::temp_dir().join(format!("runboard-retry-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        for interrupted in 0..=2 {
+            replace_link(&directory.join("current"), Path::new("healthy")).unwrap();
+            if interrupted >= 1 {
+                replace_link(&directory.join("previous"), Path::new("healthy")).unwrap();
+            }
+            if interrupted >= 2 {
+                replace_link(&directory.join("current"), Path::new("candidate")).unwrap();
+            }
+            for _ in 0..3 {
+                switch_release(&directory, Path::new("candidate"), Some(Path::new("healthy"))).unwrap();
+                assert_eq!(fs::read_link(directory.join("previous")).unwrap(), Path::new("healthy"));
+            }
+            let previous = fs::read_link(directory.join("previous")).unwrap();
+            replace_link(&directory.join("current"), &previous).unwrap();
+            assert_eq!(fs::read_link(directory.join("current")).unwrap(), Path::new("healthy"));
+        }
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

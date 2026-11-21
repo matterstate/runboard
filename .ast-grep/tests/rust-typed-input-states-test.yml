@@ -1,0 +1,9 @@
+id: rust-typed-input-states
+valid:
+  - 'struct Progress { pub phase: Phase }'
+  - 'struct Summary { pub direction: Direction }'
+  - 'struct MonitorEvent { pub phase: Option<String> }'
+  - 'struct Label { pub direction: String }'
+invalid:
+  - 'struct Progress { pub phase: String }'
+  - 'mod input { struct Summary { pub direction: String } }'
