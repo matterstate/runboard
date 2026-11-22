@@ -296,7 +296,7 @@ impl Query {
         let mut pairs: Vec<String> = self
             .0
             .iter()
-            .filter(|(name, _)| name != key)
+            .filter(|(name, _)| name != key && (key == "page" || name != "page"))
             .map(|(name, value)| format!("{}={}", encode(name), encode(value)))
             .collect();
         pairs.push(format!("{}={}", encode(key), encode(value)));
@@ -630,6 +630,8 @@ pub fn export(settings: &Settings) -> Result<(), String> {
 fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
     let mut runs = entries(settings);
     let capped = runs.len() == 4096;
+    runs.retain(|entry| query.get("project").is_empty() || entry.project.name == query.get("project"));
+    let no_reports = runs.is_empty();
     let status_counts: Vec<_> = [RunState::Running, RunState::Slow, RunState::Failed, RunState::Completed]
         .iter()
         .map(|state| {
@@ -640,13 +642,12 @@ fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
         })
         .collect();
     runs.retain(|entry| {
-        (query.get("project").is_empty() || entry.project.name == query.get("project"))
-            && (query.get("name").is_empty()
-                || entry
-                    .stage
-                    .name
-                    .to_lowercase()
-                    .contains(&query.get("name").to_lowercase()))
+        (query.get("name").is_empty()
+            || entry
+                .stage
+                .name
+                .to_lowercase()
+                .contains(&query.get("name").to_lowercase()))
             && (query.get("state").is_empty() || Some(entry.state()) == RunState::parse(query.get("state")))
             && (query.get("trainer").is_empty() || entry.stage.trainer == query.get("trainer"))
             && (query.get("tag").is_empty()
@@ -675,9 +676,7 @@ fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
             "recent" => b.stage.modified.cmp(&a.stage.modified),
             _ => {
                 let active = |entry: &Entry<'_>| matches!(entry.state(), RunState::Running | RunState::Slow);
-                active(b)
-                    .cmp(&active(a))
-                    .then_with(|| b.stage.modified.cmp(&a.stage.modified))
+                active(b).cmp(&active(a))
             }
         };
         let order = if query.get("descending") == "1" {
@@ -698,54 +697,59 @@ fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
         "Runs",
         |output| {
             html! { output,
-                <div class="actions">
+                <div class="actions status-summary">
                     {|output| {
                         output
                             .each(
                                 &status_counts,
                                 |output, (state, count)| {
-                                    html! { output, <a href=format!("/?state={state}")>{count}" "{state}</a> }
+                                    html! { output,
+                                        <a href=query
+                                            .link(
+                                                "/",
+                                                "state",
+                                                state,
+                                            )>
+                                            {count}" "
+                                            {if *state == "slow" { "no recent reports" } else { state }}
+                                        </a>
+                                    }
                                 },
                             )
                     }}
                 </div>
-                <details>
-                    <summary>"Filters and sorting · "{active_filters}" active"</summary>
-                    <form class="filters" action="/">
-                        <fieldset>
-                            <legend>"Find runs"</legend>
-                            {|output| fields(
-                                output,
-                                query,
-                                &[
-                                    ("project", "Project"),
-                                    ("name", "Name"),
-                                    ("trainer", "Trainer"),
-                                    ("tag", "Tag"),
-                                ],
-                            )}
-                            <label>
-                                "State "
-                                <select name="state">
-                                    {|output| options(
-                                        output,
-                                        &[
-                                            "",
-                                            "running",
-                                            "slow",
-                                            "stopped",
-                                            "completed",
-                                            "failed",
-                                            "cancelled",
-                                            "recorded",
-                                            "no-data",
-                                        ],
-                                        query.get("state"),
-                                    )}
-                                </select>
-                            </label>
-                        </fieldset>
+                <form id="run-filters" class="filters" action="/">
+                    <fieldset>
+                        <legend>"Find runs"</legend>
+                        {|output| fields(output, query, &[("project", "Project"), ("name", "Search runs")])}
+                        <label>
+                            "State "
+                            <select name="state">
+                                {|output| options(
+                                    output,
+                                    &[
+                                        "",
+                                        "running",
+                                        "slow",
+                                        "stopped",
+                                        "completed",
+                                        "failed",
+                                        "cancelled",
+                                        "recorded",
+                                        "no-data",
+                                    ],
+                                    query.get("state"),
+                                )}
+                            </select>
+                        </label>
+                    </fieldset>
+                    <details>
+                        <summary>"More filters and sorting · "{active_filters}" active"</summary>
                         <div class="columns">
+                            <fieldset>
+                                <legend>"Metadata"</legend>
+                                {|output| fields(output, query, &[("trainer", "Trainer"), ("tag", "Tag")])}
+                            </fieldset>
                             <fieldset>
                                 <legend>"Metric range"</legend>
                                 {|output| fields(
@@ -781,26 +785,43 @@ fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
                                 </label>
                             </fieldset>
                         </div>
-                        <div class="actions">
-                            <button>"Filter"</button>
-                            <a href="/">"Reset"</a>
-                        </div>
-                    </form>
-                </details>
+                    </details>
+                    <div class="actions">
+                        <button>"Filter"</button>
+                        <a href="/">"Reset"</a>
+                    </div>
+                </form>
             }?;
             if capped {
                 html! { output, <p class="warn">"The combined run index reached its 4096-run limit."</p> }?;
+            }
+            if runs.is_empty() {
+                html! { output,
+                    <p class="empty">
+                        {if no_reports {
+                            "No run reports discovered. Check the configured directories under Inputs."
+                        } else {
+                            "No runs match these filters. Clear a filter or reset to see all runs."
+                        }}
+                    </p>
+                }?;
             }
             html! { output,
                 <p>
                     {runs.len()}" matching runs · page "{page + 1}" of "{page_max + 1}
                     " · select up to eight."
                 </p>
-                <form action="/compare">
-                    <div class="actions">
+                <form id="run-selection" action="/compare">
+                    <div class="actions selection-toolbar">
+                        <span id="selection-count" role="status">
+                            "Select runs to compare"
+                        </span>
                         <button>"Compare selected"</button>
                         <button formaction="/export">"CSV"</button>
                         <button formaction="/report">"Static report"</button>
+                        <button id="selection-clear" type="button" hidden>
+                            "Clear selection"
+                        </button>
                     </div>
                     <table>
                         <tr>
@@ -809,9 +830,7 @@ fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
                             <th>"State"</th>
                             <th>"Step"</th>
                             <th>"Latest metrics"</th>
-                            <th>"Updated"</th>
-                            <th>"Trainer time"</th>
-                            <th>"Trainer"</th>
+                            <th>"Last report"</th>
                         </tr>
                         {|output| {
                             for entry in runs.iter().skip(page * PAGE_SIZE).take(PAGE_SIZE) {
@@ -866,7 +885,15 @@ fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
                                             <a href=format!("/run?run={}", encode(&id))>{id}</a>
                                             {|output| notice(output, &entry.warnings)}
                                         </td>
-                                        <td>{entry.state().as_str()}</td>
+                                        <td>
+                                            <span class="state" data-state=entry.state().as_str()>
+                                                {if entry.state() == RunState::Slow {
+                                                    "No recent reports"
+                                                } else {
+                                                    entry.state().as_str()
+                                                }}
+                                            </span>
+                                        </td>
                                         <td>
                                             {entry
                                                 .last
@@ -877,8 +904,7 @@ fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
                                         </td>
                                         <td>{|output| metric_lines(output, &values)}</td>
                                         <td>{|output| html::age(output, entry.stage.modified)}</td>
-                                        <td>{training_time(entry, entry.last.as_ref())}</td>
-                                        <td>{entry.stage.trainer}</td>
+
                                     </tr>
                                 }?;
                             }
@@ -920,39 +946,43 @@ fn options(output: &mut Output, values: &[&str], current: &str) -> RenderResult 
 
 fn controls(output: &mut Output, selected: &[Entry<'_>], query: &Query, metrics: &[String]) -> RenderResult {
     html! { output,
-        <details>
-            <summary>
-                "Chart options · "
-                {if query.get("metric").is_empty() { "all metrics" } else { query.get("metric") }}" · "
-                {if query.get("axis").is_empty() { "step" } else { query.get("axis") }}
-            </summary>
-            <form class="filters">
-                {|output| {
-                    output
-                        .each(
-                            selected,
-                            |output, entry| {
-                                html! { output, <input type="hidden" name="run" value=entry.id() /> }
-                            },
-                        )
-                }} <fieldset>
-                    <legend>"Chart"</legend>
-                    <label>"Metric "<input name="metric" list="metrics" value=query.get("metric") /></label>
-                    <datalist id="metrics">
-                        {|output| {
-                            output
-                                .each(
-                                    metrics,
-                                    |output, metric| html! { output, <option value=metric></option> },
-                                )
-                        }}
-                    </datalist>
-                    <label>
-                        "Axis "
-                        <select name="axis">
-                            {|output| options(output, &["step", "seconds", "time"], query.get("axis"))}
-                        </select>
-                    </label>
+        <form id="chart-filters" class="filters">
+            {|output| {
+                output
+                    .each(
+                        selected,
+                        |output, entry| html! { output, <input type="hidden" name="run" value=entry.id() /> },
+                    )
+            }}
+            <fieldset>
+                <legend>"Charts"</legend>
+                <label>
+                    "Filter metrics "
+                    <input
+                        name="metric"
+                        list="metrics"
+                        autocomplete="off"
+                        placeholder="All metrics (e.g. loss)"
+                        value=query.get("metric")
+                    />
+                </label>
+                <datalist id="metrics">
+                    {|output| {
+                        output
+                            .each(metrics, |output, metric| html! { output, <option value=metric></option> })
+                    }}
+                </datalist>
+                <label>
+                    "Axis "
+                    <select name="axis">
+                        {|output| options(output, &["step", "seconds", "time"], axis(query))}
+                    </select>
+                </label>
+                <button>"Apply"</button>
+            </fieldset>
+            <details id="chart-options">
+                <summary>"Smoothing, range and seed groups"</summary>
+                <fieldset>
                     <label>
                         "Smoothing window "
                         <input
@@ -967,19 +997,19 @@ fn controls(output: &mut Output, selected: &[Entry<'_>], query: &Query, metrics:
                         "Seed groups "
                         <input type="checkbox" name="group" value="1" checked=(query.get("group") == "1") />
                     </label>
-                </fieldset> <fieldset>
-                    <legend>"Visible range"</legend>
                     <label>
                         "From "<input type="number" step="any" name="start" value=query.get("start") />
                     </label>
                     <label>"To "<input type="number" step="any" name="end" value=query.get("end") /></label>
-                    <button>"Apply"</button>
                 </fieldset>
                 <p class="dim">
-                    "Blank metric shows all curves. Smoothing is a trailing mean; 1 shows raw values. Axes use logged fields."
+                    "Smoothing is a trailing mean; 1 shows raw values. Axes use logged fields. Gaps between sparse observations are connected, not additional samples."
                 </p>
-            </form>
-        </details>
+            </details>
+            <p class="dim">
+                "Metric names match by substring, ignoring case. Blank shows up to 32 metrics alphabetically."
+            </p>
+        </form>
     }
 }
 
@@ -1006,12 +1036,16 @@ fn training_time(entry: &Entry<'_>, last: Option<&Record>) -> String {
     }
 }
 
-fn curve(records: &[Record], metric: &str, query: &Query) -> Vec<(f64, f64)> {
-    let axis = match query.get("axis") {
+fn axis(query: &Query) -> &'static str {
+    match query.get("axis") {
         "seconds" => "seconds",
         "time" => "time",
         _ => "step",
-    };
+    }
+}
+
+fn curve(records: &[Record], metric: &str, query: &Query) -> Vec<(f64, f64)> {
+    let axis = axis(query);
     let window = query.get("smooth").parse::<usize>().unwrap_or(1).clamp(1, 100);
     let start = query.get("start").parse::<f64>().unwrap_or(f64::NEG_INFINITY);
     let end = query.get("end").parse::<f64>().unwrap_or(f64::INFINITY);
@@ -1034,15 +1068,20 @@ fn curve(records: &[Record], metric: &str, query: &Query) -> Vec<(f64, f64)> {
 }
 
 fn metric_names(logs: &[Vec<Record>], selected: &str) -> Vec<String> {
-    if !selected.is_empty() {
-        return vec![selected.into()];
-    }
+    let selected = selected.to_lowercase();
     let mut names = BTreeSet::new();
     for log in logs {
         for record in log.iter().rev() {
             for (key, _) in &record.0 {
-                if !matches!(key.as_str(), "step" | "time" | "seconds") && names.len() < 32 {
+                let matches_filter = selected.is_empty() || key.to_lowercase().contains(&selected);
+                if !matches_filter {
+                    continue;
+                }
+                if !matches!(key.as_str(), "step" | "time" | "seconds") {
                     names.insert(key.clone());
+                    if names.len() > 32 {
+                        names.pop_last();
+                    }
                 }
             }
         }
@@ -1371,7 +1410,16 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> RenderRes
                 }?;
                 controls(output, selected, query, &metric_names(&logs, ""))?;
             }
-            for metric in metric_names(&logs, query.get("metric")) {
+            let names = metric_names(&logs, query.get("metric"));
+            let no_matching_metric = names.is_empty() && !query.get("metric").is_empty();
+            if no_matching_metric {
+                html! { output,
+                    <p class="empty">
+                        "No matching metric observations. Clear the metric filter or choose a logged metric."
+                    </p>
+                }?;
+            }
+            for metric in names {
                 let series: Vec<Series> = selected
                     .iter()
                     .zip(&logs)
@@ -1380,9 +1428,9 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> RenderRes
                         points: curve(log, &metric, query),
                     })
                     .collect();
-                html::chart(output, &metric, &series)?;
+                html::chart(output, &metric, axis(query), &series)?;
                 if query.get("group") == "1" {
-                    seed_groups(output, selected, &series)?;
+                    seed_groups(output, selected, &series, axis(query))?;
                 }
             }
             if !offline {
@@ -1415,7 +1463,7 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> RenderRes
     )
 }
 
-fn seed_groups(output: &mut Output, selected: &[Entry<'_>], series: &[Series]) -> RenderResult {
+fn seed_groups(output: &mut Output, selected: &[Entry<'_>], series: &[Series], axis: &str) -> RenderResult {
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, entry) in selected.iter().enumerate() {
         let group = entry.field("group");
@@ -1557,7 +1605,7 @@ fn seed_groups(output: &mut Output, selected: &[Entry<'_>], series: &[Series]) -
         </p>
     }?;
     if !curves.is_empty() {
-        html::chart(output, "Seed group mean ± sample standard deviation", &curves)?;
+        html::chart(output, "Seed group mean ± sample standard deviation", axis, &curves)?;
     }
     Ok(())
 }
@@ -1643,10 +1691,22 @@ fn run_page(settings: &Settings, entry: &Entry<'_>, query: &Query) -> RenderResu
                 summary_table(output, selected, &benchmarks)?;
             }
             controls(output, selected, query, &metric_names(std::slice::from_ref(&log), ""))?;
+            if names.is_empty() {
+                html! { output,
+                    <p class="empty">
+                        {if query.get("metric").is_empty() {
+                            "No chartable metric observations yet."
+                        } else {
+                            "No matching metric observations. Clear the metric filter or choose a logged metric."
+                        }}
+                    </p>
+                }?;
+            }
             for metric in names {
                 html::chart(
                     output,
                     &metric,
+                    axis(query),
                     &[Series {
                         label: entry.id(),
                         points: curve(&log, &metric, query),
@@ -2193,6 +2253,7 @@ fn devices(settings: &Settings, query: &Query) -> RenderResult<String> {
                         html::chart(
                             output,
                             &format!("{metric} · hours before now"),
+                            "hours before now",
                             &[Series {
                                 label: title.clone(),
                                 points,
@@ -2212,6 +2273,22 @@ mod tests {
     use super::*;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn metric_order_and_filtering_do_not_depend_on_observation_order() {
+        let mut log = (0..40)
+            .map(|index| Record(vec![(format!("metric_{index:02}"), f64::from(index))]))
+            .collect::<Vec<_>>();
+        let expected = (0..32).map(|index| format!("metric_{index:02}")).collect::<Vec<_>>();
+        for _ in 0..40 {
+            assert_eq!(metric_names(&[log.clone()], ""), expected);
+            assert_eq!(metric_names(&[log.clone()], "METRIC_39"), ["metric_39"]);
+            assert!(metric_names(&[log.clone()], "missing").is_empty());
+            let latest = data::latest_values(&log).unwrap();
+            assert!(latest.0.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            log.rotate_left(1);
+        }
+    }
 
     #[test]
     fn rendering_errors_are_http_failures_without_partial_markup() {

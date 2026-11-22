@@ -111,6 +111,32 @@ CI. The MLPerf sketch uses synthetic scalars, not a benchmark, and does not
 replace MLPerf's compliance logger. Needle's trainers are not modified by this
 prototype.
 
+## Browsing runs
+
+Search, project and state filters are visible on the runs page. The default
+active-first order uses run names as a stable tie-breaker; choose `recent` to
+sort by report age. Status counts respect the project filter. Comparison
+selections persist across filters and pages in tab-local session storage, up to
+eight runs; **Clear selection** removes them.
+
+Latest metric labels and chart names are alphabetically ordered. On run and
+comparison pages, the metric filter matches substrings without regard to case:
+`loss` can show both training and evaluation loss. The index's metric-range
+filter still takes an exact metric key.
+
+Charts show axis ticks and inspectable, downsampled observations. Hover or tap
+for values, or focus a chart and use the arrow keys, Home and End. Use the zoom
+buttons or Ctrl/⌘ + scroll to zoom, then drag to pan. A zoomed chart keeps its
+current data until **Reset zoom**. Sparse observations are connected by lines;
+the inspector reports displayed samples, not interpolated measurements.
+
+Automatic page replacement waits while text is selected, focus is in the main
+page, or the pointer is over a table, chart or selection toolbar. Pending
+changes are coalesced and applied when interaction ends. **Pause updates** holds
+the page; **Apply updates** applies a pending snapshot without resuming
+automatic updates. The connection status and each run's last-report age are
+separate.
+
 ## Live updates
 
 The normal command starts a private NATS server on `127.0.0.1:4223`, with
@@ -311,6 +337,15 @@ Route snapshots cover the run index, run detail, comparisons, offline reports,
 queue, devices and input diagnostics. Only timestamps and relative ages are
 normalized. Run `cargo test dashboard_route_snapshots` to check them; review
 snapshot diffs before accepting updates with `INSTA_UPDATE=always`.
+
+The x86-64 Linux browser check starts an isolated server with synthetic reports
+and runs Chromium with Playwright. It covers text selection, metric editing,
+in-flight refresh races, chart inspection and zoom, cross-page comparisons,
+narrow layouts and a real SSE update. Run the same check locally and in CI:
+
+```sh
+nix build --print-build-logs --no-link .#checks.x86_64-linux.browser
+```
 
 The flake uses flake-parts, devshell, Crane and rust-overlay. Targets are x86-64
 Linux, ARM64 Linux and ARM64 macOS. The shell matches the Conform formatters.

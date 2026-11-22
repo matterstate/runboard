@@ -73,6 +73,7 @@
                 ]
               );
           pythonEnvironment = pythonSet.mkVirtualEnv "runboard-python" workspace.deps.default;
+          browserPython = pkgs.python313.withPackages (ps: [ ps.playwright ]);
           src = pkgs.lib.fileset.toSource {
             root = ./.;
             fileset = pkgs.lib.fileset.unions [
@@ -127,6 +128,21 @@
             };
           }
           // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+            browser =
+              pkgs.runCommand "runboard-browser"
+                {
+                  nativeBuildInputs = [ browserPython ];
+                  RUNBOARD_BIN = pkgs.lib.getExe runboard;
+                  CHROMIUM_BIN = pkgs.lib.getExe pkgs.chromium;
+                  FONTCONFIG_FILE = pkgs.makeFontsConf {
+                    fontDirectories = [ pkgs.dejavu_fonts ];
+                  };
+                }
+                ''
+                  export HOME="$TMPDIR"
+                  python ${./python/browser.py}
+                  touch "$out"
+                '';
             deployment = import ./nix/deployment-test.nix {
               inherit pkgs;
               module = inputs.self.nixosModules.default;

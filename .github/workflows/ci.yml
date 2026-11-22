@@ -32,6 +32,9 @@ jobs:
       - name: Build, test, lint and format Rust
         run: >-
           nix build --print-build-logs --no-link .#checks.${{ matrix.system }}.runboard .#checks.${{ matrix.system }}.clippy .#checks.${{ matrix.system }}.rustfmt
+      - name: Verify live dashboard interactions in Chromium
+        if: matrix.system == 'x86_64-linux'
+        run: nix build --print-build-logs --no-link .#checks.x86_64-linux.browser
       - name: Verify deployment in a disposable NixOS VM
         if: matrix.system == 'x86_64-linux'
         run: |

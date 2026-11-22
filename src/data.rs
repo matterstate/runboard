@@ -399,19 +399,20 @@ pub fn latest_values(records: &[Record]) -> Option<Record> {
             .collect(),
     );
     let fields_max = latest.0.len() + LATEST_METRICS_MAX;
-    for record in records.iter().rev() {
+    'records: for record in records.iter().rev() {
         for (name, value) in &record.0 {
             if matches!(name.as_str(), "step" | "time" | "seconds") {
                 continue;
             }
             if latest.get(name).is_none() {
                 if latest.0.len() == fields_max {
-                    return Some(latest);
+                    break 'records;
                 }
                 latest.0.push((name.clone(), *value));
             }
         }
     }
+    latest.0.sort_by(|a, b| a.0.cmp(&b.0));
     (!latest.0.is_empty()).then_some(latest)
 }
 
