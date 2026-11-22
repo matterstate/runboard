@@ -30,6 +30,11 @@ def update(page: Page) -> None:
 
 def interactions(page: Page, address: str, log: Path) -> None:
     page.goto(address + "/run?run=demo/example")
+    assert "loss" in page.locator("dl.metrics dt").all_text_contents()
+    assert "loss" in [
+        title.split(" ·", 1)[0]
+        for title in page.locator("figure figcaption").all_text_contents()
+    ]
     page.evaluate("""() => {
         window.original_main = document.querySelector('main');
         const range = document.createRange();
@@ -125,6 +130,13 @@ def interactions(page: Page, address: str, log: Path) -> None:
 
     page.goto(address)
     expect(page.locator("input[name=name]")).to_be_visible()
+    preview = (
+        page.locator("table tr")
+        .filter(has=page.locator('input[value="demo/example"]'))
+        .locator("td")
+        .nth(4)
+    )
+    expect(preview).to_contain_text("loss:")
     page.locator('input[name=run][value="demo/example"]').check()
     page.get_by_role("link", name="Next", exact=True).click()
     page.locator('input[name=run][value="demo/run-50"]').check()
@@ -154,7 +166,7 @@ def interactions(page: Page, address: str, log: Path) -> None:
 
     for path in ["/?name=example", "/run?run=demo/example&metric=loss"]:
         page.goto(address + path)
-        for width in [1280, 390]:
+        for width in [1600, 1280, 390]:
             page.set_viewport_size({"width": width, "height": 900})
             page.wait_for_function("""() => {
                 const plot = document.querySelector('svg.plot');
@@ -164,6 +176,14 @@ def interactions(page: Page, address: str, log: Path) -> None:
             assert page.evaluate(
                 "document.documentElement.scrollWidth <= innerWidth"
             ), f"document overflow on {path} at {width}px"
+            if path.startswith("/?"):
+                assert page.evaluate("""() => {
+                    const form = document.querySelector('#run-selection');
+                    const row = form.querySelector('tr').getBoundingClientRect();
+                    return form.clientWidth >= innerWidth - 48 &&
+                        (innerWidth < 600 ||
+                            Math.abs(row.width - form.clientWidth) < 2);
+                }"""), f"runs table does not fill available width at {width}px"
     page.goto(address + "/run?run=demo/example&metric=missing")
     expect(page.locator(".empty")).to_contain_text("No matching metric")
 
@@ -182,6 +202,10 @@ def main() -> None:
                         "loss": 5 - step,
                         "accuracy": step / 10,
                         "eval/loss": 5.5 - step,
+                        **{
+                            f"device/temperature_{index:02}": index
+                            for index in range(40)
+                        },
                     }
                 )
                 + "\n"

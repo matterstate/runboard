@@ -823,94 +823,96 @@ fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
                             "Clear selection"
                         </button>
                     </div>
-                    <table>
-                        <tr>
-                            <th>"Select"</th>
-                            <th>"Project / run"</th>
-                            <th>"State"</th>
-                            <th>"Step"</th>
-                            <th>"Latest metrics"</th>
-                            <th>"Last report"</th>
-                        </tr>
-                        {|output| {
-                            for entry in runs.iter().skip(page * PAGE_SIZE).take(PAGE_SIZE) {
-                                let id = entry.id();
-                                let mut values = entry
-                                    .last
-                                    .as_ref()
-                                    .map(|record| {
-                                        record
-                                            .0
-                                            .iter()
-                                            .filter(|(key, _)| {
-                                                !matches!(key.as_str(), "step" | "time" | "seconds")
-                                            })
-                                            .take(4)
-                                            .map(|(key, value)| format!("{key}: {}", number(*value)))
-                                            .collect::<Vec<_>>()
-                                    })
-                                    .unwrap_or_default();
-                                if !metric.is_empty() {
-                                    values = entry
-                                        .metric(metric)
-                                        .map(|value| vec![format!("{metric}: {}", number(value))])
+                    <div class="table-scroll" role="region" aria-label="Runs table" tabindex="0">
+                        <table>
+                            <tr>
+                                <th>"Select"</th>
+                                <th>"Project / run"</th>
+                                <th>"State"</th>
+                                <th>"Step"</th>
+                                <th>"Latest metrics"</th>
+                                <th>"Last report"</th>
+                            </tr>
+                            {|output| {
+                                for entry in runs.iter().skip(page * PAGE_SIZE).take(PAGE_SIZE) {
+                                    let id = entry.id();
+                                    let mut values = entry
+                                        .last
+                                        .as_ref()
+                                        .map(|record| {
+                                            record
+                                                .0
+                                                .iter()
+                                                .filter(|(key, _)| {
+                                                    !matches!(key.as_str(), "step" | "time" | "seconds")
+                                                })
+                                                .take(4)
+                                                .map(|(key, value)| format!("{key}: {}", number(*value)))
+                                                .collect::<Vec<_>>()
+                                        })
                                         .unwrap_or_default();
-                                } else if values.is_empty() {
-                                    if let Ok(summary) = &entry.summary {
-                                        values = summary
-                                            .iter()
-                                            .take(4)
-                                            .map(|metric| {
-                                                format!(
-                                                    "{}: {} {}",
-                                                    metric.name,
-                                                    number(metric.value),
-                                                    metric.unit,
-                                                )
-                                            })
-                                            .collect();
+                                    if !metric.is_empty() {
+                                        values = entry
+                                            .metric(metric)
+                                            .map(|value| vec![format!("{metric}: {}", number(value))])
+                                            .unwrap_or_default();
+                                    } else if values.is_empty() {
+                                        if let Ok(summary) = &entry.summary {
+                                            values = summary
+                                                .iter()
+                                                .take(4)
+                                                .map(|metric| {
+                                                    format!(
+                                                        "{}: {} {}",
+                                                        metric.name,
+                                                        number(metric.value),
+                                                        metric.unit,
+                                                    )
+                                                })
+                                                .collect();
+                                        }
                                     }
-                                }
-                                html! { output,
-                                    <tr>
-                                        <td>
-                                            <input
-                                                aria-label=format!("Select {id}")
-                                                type="checkbox"
-                                                name="run"
-                                                value=&id
-                                            />
-                                        </td>
-                                        <td>
-                                            <a href=format!("/run?run={}", encode(&id))>{id}</a>
-                                            {|output| notice(output, &entry.warnings)}
-                                        </td>
-                                        <td>
-                                            <span class="state" data-state=entry.state().as_str()>
-                                                {if entry.state() == RunState::Slow {
-                                                    "No recent reports"
-                                                } else {
-                                                    entry.state().as_str()
-                                                }}
-                                            </span>
-                                        </td>
-                                        <td>
-                                            {entry
-                                                .last
-                                                .as_ref()
-                                                .and_then(|record| record.get("step"))
-                                                .map(number)
-                                                .unwrap_or_default()}
-                                        </td>
-                                        <td>{|output| metric_lines(output, &values)}</td>
-                                        <td>{|output| html::age(output, entry.stage.modified)}</td>
+                                    html! { output,
+                                        <tr>
+                                            <td>
+                                                <input
+                                                    aria-label=format!("Select {id}")
+                                                    type="checkbox"
+                                                    name="run"
+                                                    value=&id
+                                                />
+                                            </td>
+                                            <td>
+                                                <a href=format!("/run?run={}", encode(&id))>{id}</a>
+                                                {|output| notice(output, &entry.warnings)}
+                                            </td>
+                                            <td>
+                                                <span class="state" data-state=entry.state().as_str()>
+                                                    {if entry.state() == RunState::Slow {
+                                                        "No recent reports"
+                                                    } else {
+                                                        entry.state().as_str()
+                                                    }}
+                                                </span>
+                                            </td>
+                                            <td>
+                                                {entry
+                                                    .last
+                                                    .as_ref()
+                                                    .and_then(|record| record.get("step"))
+                                                    .map(number)
+                                                    .unwrap_or_default()}
+                                            </td>
+                                            <td>{|output| metric_lines(output, &values)}</td>
+                                            <td>{|output| html::age(output, entry.stage.modified)}</td>
 
-                                    </tr>
-                                }?;
-                            }
-                            Ok(())
-                        }}
-                    </table>
+                                        </tr>
+                                    }?;
+                                }
+                                Ok(())
+                            }}
+                        </table>
+                    </div>
                 </form>
             }?;
             if page > 0 {
@@ -1007,7 +1009,7 @@ fn controls(output: &mut Output, selected: &[Entry<'_>], query: &Query, metrics:
                 </p>
             </details>
             <p class="dim">
-                "Metric names match by substring, ignoring case. Blank shows up to 32 metrics alphabetically."
+                "Metric names match by substring, ignoring case. Blank shows up to 32 metrics: loss, other training metrics, then telemetry; alphabetical within each group."
             </p>
         </form>
     }
@@ -1078,7 +1080,7 @@ fn metric_names(logs: &[Vec<Record>], selected: &str) -> Vec<String> {
                     continue;
                 }
                 if !matches!(key.as_str(), "step" | "time" | "seconds") {
-                    names.insert(key.clone());
+                    names.insert(data::metric_order(key));
                     if names.len() > 32 {
                         names.pop_last();
                     }
@@ -1086,7 +1088,7 @@ fn metric_names(logs: &[Vec<Record>], selected: &str) -> Vec<String> {
             }
         }
     }
-    names.into_iter().collect()
+    names.into_iter().map(|(_, name)| name.to_owned()).collect()
 }
 
 fn metadata_table(output: &mut Output, selected: &[Entry<'_>]) -> RenderResult {
@@ -2286,6 +2288,18 @@ mod tests {
             assert!(metric_names(&[log.clone()], "missing").is_empty());
             let latest = data::latest_values(&log).unwrap();
             assert!(latest.0.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            log.rotate_left(1);
+        }
+        let mut log = (0..40)
+            .map(|index| Record(vec![(format!("device/temperature_{index:02}"), f64::from(index))]))
+            .collect::<Vec<_>>();
+        log.push(Record(vec![("loss".into(), 0.5), ("accuracy".into(), 0.9)]));
+        for _ in 0..log.len() {
+            let names = metric_names(&[log.clone()], "");
+            assert_eq!(&names[..2], ["loss", "accuracy"]);
+            let latest = data::latest_values(&log).unwrap();
+            assert_eq!(latest.0[0].0, "loss");
+            assert_eq!(latest.0[1].0, "accuracy");
             log.rotate_left(1);
         }
     }

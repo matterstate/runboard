@@ -81,6 +81,29 @@ pub struct MonitorEvent {
     pub exit_code: Option<i32>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MetricKind {
+    Loss,
+    Training,
+    Telemetry,
+}
+
+pub fn metric_order(name: &str) -> (MetricKind, &str) {
+    let namespace = name.split(['/', '.']).next().unwrap_or_default();
+    let kind = if matches!(namespace, "device" | "host") {
+        MetricKind::Telemetry
+    } else if name
+        .rsplit(['/', '.', '_'])
+        .next()
+        .is_some_and(|part| part.eq_ignore_ascii_case("loss"))
+    {
+        MetricKind::Loss
+    } else {
+        MetricKind::Training
+    };
+    (kind, name)
+}
+
 #[derive(Clone)]
 pub struct Record(pub Vec<(String, f64)>);
 
@@ -412,7 +435,7 @@ pub fn latest_values(records: &[Record]) -> Option<Record> {
             }
         }
     }
-    latest.0.sort_by(|a, b| a.0.cmp(&b.0));
+    latest.0.sort_by(|a, b| metric_order(&a.0).cmp(&metric_order(&b.0)));
     (!latest.0.is_empty()).then_some(latest)
 }
 

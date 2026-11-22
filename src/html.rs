@@ -124,6 +124,9 @@ pub fn page(
 const STYLE: &str = r#"
 * { box-sizing: border-box; }
 body { font: 14px/1.5 system-ui,sans-serif; max-width: 80rem; margin: 2rem auto; padding: 0 1.25rem; color: #222; background: #fcfcfc; }
+body:has(#run-selection) { max-width: none; }
+.table-scroll { overflow-x: auto; }
+.table-scroll table { display: table; width: 100%; }
 nav, .actions { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1.25rem; }
 nav { padding-bottom: 1rem; border-bottom: 1px solid #ddd; }
 #live-status { margin-left: auto; }
@@ -690,7 +693,7 @@ async function update_snapshot(force = false) {
             if (previous) figure.replaceWith(previous);
         });
         const scroll = {x: scrollX, y: scrollY};
-        const table_scroll = Array.from(current.querySelectorAll("table"), table => table.scrollLeft);
+        const table_scroll = Array.from(current.querySelectorAll("table,.table-scroll"), table => table.scrollLeft);
         current.replaceWith(next);
         next.querySelectorAll("form").forEach(form => {
             form.querySelectorAll("input,select").forEach(element => {
@@ -703,7 +706,7 @@ async function update_snapshot(force = false) {
         });
         refresh_selection();
         observe_charts();
-        next.querySelectorAll("table").forEach((table, index) => { table.scrollLeft = table_scroll[index] || 0; });
+        next.querySelectorAll("table,.table-scroll").forEach((table, index) => { table.scrollLeft = table_scroll[index] || 0; });
         scrollTo(scroll.x, scroll.y);
         snapshot_failed = false;
     } catch (_) {

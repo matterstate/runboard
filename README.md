@@ -119,10 +119,12 @@ sort by report age. Status counts respect the project filter. Comparison
 selections persist across filters and pages in tab-local session storage, up to
 eight runs; **Clear selection** removes them.
 
-Latest metric labels and chart names are alphabetically ordered. On run and
-comparison pages, the metric filter matches substrings without regard to case:
-`loss` can show both training and evaluation loss. The index's metric-range
-filter still takes an exact metric key.
+Metric previews and default charts put loss first, then other training metrics,
+then `host/` and `device/` telemetry, alphabetically within each group. This
+keeps telemetry from crowding loss out of the previews and chart limit. On run
+and comparison pages, the metric filter matches substrings without regard to
+case: `loss` can show both training and evaluation loss. The index's
+metric-range filter still takes an exact metric key.
 
 Charts show axis ticks and inspectable, downsampled observations. Hover or tap
 for values, or focus a chart and use the arrow keys, Home and End. Use the zoom
