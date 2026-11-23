@@ -565,6 +565,12 @@ pub fn route(settings: &Settings, target: &str) -> Response {
     {
         return Response::error(400, "Smoothing window must be between 1 and 100");
     }
+    if MetricAggregation::parse(query.get("aggregate")).is_none() {
+        return Response::error(400, "aggregate must be latest, mean, min or max");
+    }
+    if Smoothing::parse(query.get("smoothing")).is_none() {
+        return Response::error(400, "smoothing must be mean or ema");
+    }
     let response = match path {
         "/" => Response::html(index(settings, &query)),
         "/run" => match selection(settings, &[query.get("run")]) {
@@ -996,7 +1002,13 @@ fn options(output: &mut Output, values: &[&str], current: &str) -> RenderResult 
     })
 }
 
-fn controls(output: &mut Output, selected: &[Entry<'_>], query: &Query, metrics: &[String]) -> RenderResult {
+fn controls(
+    output: &mut Output,
+    selected: &[Entry<'_>],
+    query: &Query,
+    metrics: &[String],
+    aggregation: Option<MetricAggregation>,
+) -> RenderResult {
     html! { output,
         <form id="chart-filters" class="filters">
             {|output| {
@@ -1007,7 +1019,7 @@ fn controls(output: &mut Output, selected: &[Entry<'_>], query: &Query, metrics:
                     )
             }}
             <fieldset>
-                <legend>"Charts"</legend>
+                <legend>"Metrics and charts"</legend>
                 <label>
                     "Filter metrics "
                     <input
@@ -1030,13 +1042,51 @@ fn controls(output: &mut Output, selected: &[Entry<'_>], query: &Query, metrics:
                         {|output| options(output, &["step", "seconds", "time"], axis(query))}
                     </select>
                 </label>
+                {|output| {
+                    if let Some(aggregation) = aggregation {
+                        html! { output,
+                            <label>
+                                "Value summary "
+                                <select name="aggregate">
+                                    {|output| {
+                                        for (kind, label) in [
+                                            (MetricAggregation::Latest, "Latest"),
+                                            (MetricAggregation::Mean, "Mean"),
+                                            (MetricAggregation::Min, "Min"),
+                                            (MetricAggregation::Max, "Max"),
+                                        ] {
+                                            html! { output,
+                                                <option value=kind.as_str() selected=(kind == aggregation)>
+                                                    {label}
+                                                </option>
+                                            }?;
+                                        }
+                                        Ok(())
+                                    }}
+                                </select>
+                            </label>
+                        }
+                    } else {
+                        Ok(())
+                    }
+                }}
                 <button>"Apply"</button>
             </fieldset>
             <details id="chart-options">
                 <summary>"Smoothing, range and seed groups"</summary>
                 <fieldset>
                     <label>
-                        "Smoothing window "
+                        "Smoothing method " <select name="smoothing">
+                            <option value="mean" selected=(query.get("smoothing") != "ema")>
+                                "Trailing mean"
+                            </option>
+                            <option value="ema" selected=(query.get("smoothing") == "ema")>
+                                "EMA"
+                            </option>
+                        </select>
+                    </label>
+                    <label>
+                        "Smoothing span "
                         <input
                             type="number"
                             name="smooth"
@@ -1055,11 +1105,11 @@ fn controls(output: &mut Output, selected: &[Entry<'_>], query: &Query, metrics:
                     <label>"To "<input type="number" step="any" name="end" value=query.get("end") /></label>
                 </fieldset>
                 <p class="dim">
-                    "Smoothing is a trailing mean; 1 shows raw values. Axes use logged fields. Gaps between sparse observations are connected, not additional samples."
+                    "Span 1 shows raw values. Trailing mean uses the last N observations. EMA uses alpha = 2 / (span + 1), seeded from the first observation. Smoothing affects charts, not table summaries. Axes use logged fields; sparse observations are not filled."
                 </p>
             </details>
             <p class="dim">
-                "Metric names match by substring, ignoring case. Blank shows up to 32 metrics: loss, step timing and throughput, other training metrics, then telemetry; alphabetical within each group."
+                "Search any reported metric by substring, ignoring case. Each page shows up to 32 metrics; Next metrics shows the rest. Loss, step timing and throughput appear first, then other metrics alphabetically within each group."
             </p>
         </form>
     }
@@ -1101,17 +1151,30 @@ fn curve(records: &[Record], metric: &str, query: &Query) -> Vec<(f64, f64)> {
     let window = query.get("smooth").parse::<usize>().unwrap_or(1).clamp(1, 100);
     let start = query.get("start").parse::<f64>().unwrap_or(f64::NEG_INFINITY);
     let end = query.get("end").parse::<f64>().unwrap_or(f64::INFINITY);
+    let smoothing = Smoothing::parse(query.get("smoothing")).expect("validated smoothing method");
+    let alpha = 2.0 / (window as f64 + 1.0);
+    let mut ema: Option<f64> = None;
     let mut history = std::collections::VecDeque::new();
     let mut points = Vec::new();
     for record in records {
         let (Some(x), Some(y)) = (record.get(axis), record.get(metric)) else {
             continue;
         };
-        history.push_back(y);
-        if history.len() > window {
-            history.pop_front();
-        }
-        let y = history.iter().map(|value| value / history.len() as f64).sum::<f64>();
+        let y = match smoothing {
+            Smoothing::Mean => {
+                history.push_back(y);
+                if history.len() > window {
+                    history.pop_front();
+                }
+                history.iter().map(|value| value / history.len() as f64).sum::<f64>()
+            }
+            Smoothing::ExponentialMovingAverage => {
+                ema = Some(ema.map(|previous| previous * (1.0 - alpha) + y * alpha).unwrap_or(y))
+                    .filter(|value| value.is_finite());
+                let Some(value) = ema else { continue };
+                value
+            }
+        };
         if x >= start && x <= end && y.is_finite() {
             points.push((x, y));
         }
@@ -1119,7 +1182,73 @@ fn curve(records: &[Record], metric: &str, query: &Query) -> Vec<(f64, f64)> {
     points
 }
 
-fn metric_names(logs: &[Vec<Record>], selected: &str) -> Vec<String> {
+enum Smoothing {
+    Mean,
+    ExponentialMovingAverage,
+}
+
+impl Smoothing {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "" | "mean" => Some(Self::Mean),
+            "ema" => Some(Self::ExponentialMovingAverage),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MetricAggregation {
+    Latest,
+    Mean,
+    Min,
+    Max,
+}
+
+impl MetricAggregation {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "" | "latest" => Some(Self::Latest),
+            "mean" => Some(Self::Mean),
+            "min" => Some(Self::Min),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Latest => "latest",
+            Self::Mean => "mean",
+            Self::Min => "min",
+            Self::Max => "max",
+        }
+    }
+}
+
+fn metric_value(log: &[Record], key: &str, aggregation: MetricAggregation) -> Option<f64> {
+    let values = log.iter().filter_map(|record| record.get(key));
+    match aggregation {
+        MetricAggregation::Latest => log.iter().rev().find_map(|record| record.get(key)),
+        MetricAggregation::Min => values.reduce(f64::min),
+        MetricAggregation::Max => values.reduce(f64::max),
+        MetricAggregation::Mean => {
+            let count = values.clone().count();
+            if count == 0 {
+                return None;
+            }
+            let mean = values.map(|value| value / count as f64).sum::<f64>();
+            mean.is_finite().then_some(mean)
+        }
+    }
+}
+
+struct MetricPage {
+    names: Vec<String>,
+    next: Option<String>,
+}
+
+fn metric_page(logs: &[Vec<Record>], selected: &str, after: &str) -> MetricPage {
     let selected = selected.to_lowercase();
     let mut names = BTreeSet::new();
     for log in logs {
@@ -1130,15 +1259,41 @@ fn metric_names(logs: &[Vec<Record>], selected: &str) -> Vec<String> {
                     continue;
                 }
                 if !matches!(key.as_str(), "step" | "time" | "seconds") {
+                    if !after.is_empty() && data::metric_order(key) <= data::metric_order(after) {
+                        continue;
+                    }
                     names.insert(data::metric_order(key));
-                    if names.len() > 32 {
+                    if names.len() > 33 {
                         names.pop_last();
                     }
                 }
             }
         }
     }
-    names.into_iter().map(|(_, name)| name.to_owned()).collect()
+    let has_next = names.len() > 32;
+    if has_next {
+        names.pop_last();
+    }
+    let names: Vec<String> = names.into_iter().map(|(_, name)| name.to_owned()).collect();
+    let next = if has_next { names.last().cloned() } else { None };
+    MetricPage { names, next }
+}
+
+fn metric_navigation(output: &mut Output, path: &str, query: &Query, page: &MetricPage) -> RenderResult {
+    html! { output,
+        <div class="actions metric-navigation">
+            <span>{page.names.len()}" matching metrics shown"</span>
+            {|output| {
+                if !query.get("metric_after").is_empty() {
+                    html! { output, <a href=query.link(path, "metric_after", "")>"First metrics"</a> }?;
+                }
+                if let Some(next) = &page.next {
+                    html! { output, <a href=query.link(path, "metric_after", next)>"Next metrics"</a> }?;
+                }
+                Ok(())
+            }}
+        </div>
+    }
 }
 
 fn metadata_table(output: &mut Output, selected: &[Entry<'_>]) -> RenderResult {
@@ -1364,6 +1519,7 @@ fn benchmark_metrics(entry: &Entry<'_>) -> Result<Vec<Summary>, String> {
 
 fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> RenderResult<String> {
     let logs: Vec<Vec<Record>> = selected.iter().map(records).collect();
+    let aggregation = MetricAggregation::parse(query.get("aggregate")).expect("validated metric aggregation");
     let (benchmarks, warnings) = summaries(selected);
     let has_benchmarks = benchmarks.iter().any(|metrics| !metrics.is_empty()) || !warnings.is_empty();
     html::page(
@@ -1383,7 +1539,8 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> RenderRes
             html! { output,
                 <h2>"Training performance"</h2>
                 <p>
-                    "Latest reported values from each trainer, not recomputed whole-run averages. Step durations are converted from seconds to milliseconds. Not reported means no valid value was found in the retained log history."
+                    "Value summary: "{aggregation.as_str()}
+                    " of retained reported samples. Mean is arithmetic, not time-weighted or a recomputed whole-run throughput. Step durations are converted from seconds to milliseconds. Not reported means no valid value was found in retained history."
                 </p>
                 <div class="table-scroll" role="region" aria-label="Training performance" tabindex="0">
                     <table id="training-performance">
@@ -1404,10 +1561,7 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> RenderRes
                                                 ("train/step_seconds_max", 1000.0),
                                                 ("train/tokens_per_second", 1.0),
                                             ] {
-                                                let value = log
-                                                    .iter()
-                                                    .rev()
-                                                    .find_map(|record| record.get(key))
+                                                let value = metric_value(log, key, aggregation)
                                                     .filter(|value| *value >= 0.0)
                                                     .map(|value| value * scale)
                                                     .filter(|value| value.is_finite())
@@ -1503,10 +1657,57 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> RenderRes
                         }} <a href="#comparison-metadata">"Metadata differences"</a>
                     </div>
                 }?;
-                controls(output, selected, query, &metric_names(&logs, ""))?;
+                controls(
+                    output,
+                    selected,
+                    query,
+                    &metric_page(&logs, "", "").names,
+                    Some(aggregation),
+                )?;
             }
-            let names = metric_names(&logs, query.get("metric"));
-            let no_matching_metric = names.is_empty() && !query.get("metric").is_empty();
+            let page = metric_page(&logs, query.get("metric"), query.get("metric_after"));
+            if !offline {
+                metric_navigation(output, "/compare", query, &page)?;
+            }
+            html! { output,
+                <h2>"Metric values"</h2>
+                <p class="dim">
+                    "Value summary: "{aggregation.as_str()}
+                    " in each metric's logged units. Search above or use Next metrics to browse every reported numeric metric in retained history. Missing samples are not filled or counted as zero."
+                </p>
+                <div class="table-scroll" role="region" aria-label="Metric values" tabindex="0">
+                    <table id="metric-values">
+                        <tr>
+                            <th>"Metric"</th>
+                            {|output| {
+                                output.each(selected, |output, entry| html! { output, <th>{entry.id()}</th> })
+                            }}
+                        </tr>
+                        {|output| {
+                            for name in &page.names {
+                                html! { output,
+                                    <tr>
+                                        <th scope="row" class="metric-name">
+                                            {name}
+                                        </th>
+                                        {|output| {
+                                            for log in &logs {
+                                                let value = metric_value(log, name, aggregation)
+                                                    .map(number)
+                                                    .unwrap_or_else(|| "Not reported".into());
+                                                html! { output, <td>{value}</td> }?;
+                                            }
+                                            Ok(())
+                                        }}
+                                    </tr>
+                                }?;
+                            }
+                            Ok(())
+                        }}
+                    </table>
+                </div>
+            }?;
+            let no_matching_metric = page.names.is_empty() && !query.get("metric").is_empty();
             if no_matching_metric {
                 html! { output,
                     <p class="empty">
@@ -1514,7 +1715,7 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> RenderRes
                     </p>
                 }?;
             }
-            for metric in names {
+            for metric in page.names {
                 let series: Vec<Series> = selected
                     .iter()
                     .zip(&logs)
@@ -1708,7 +1909,12 @@ fn seed_groups(output: &mut Output, selected: &[Entry<'_>], series: &[Series], a
 fn run_page(settings: &Settings, entry: &Entry<'_>, query: &Query) -> RenderResult<String> {
     let selected = std::slice::from_ref(entry);
     let log = records(entry);
-    let names = metric_names(std::slice::from_ref(&log), query.get("metric"));
+    let page = metric_page(
+        std::slice::from_ref(&log),
+        query.get("metric"),
+        query.get("metric_after"),
+    );
+    let names = &page.names;
     let (benchmarks, warnings) = summaries(selected);
     let has_benchmarks = benchmarks.iter().any(|metrics| !metrics.is_empty()) || !warnings.is_empty();
     html::page(
@@ -1785,7 +1991,14 @@ fn run_page(settings: &Settings, entry: &Entry<'_>, query: &Query) -> RenderResu
                 notice(output, &warnings)?;
                 summary_table(output, selected, &benchmarks)?;
             }
-            controls(output, selected, query, &metric_names(std::slice::from_ref(&log), ""))?;
+            controls(
+                output,
+                selected,
+                query,
+                &metric_page(std::slice::from_ref(&log), "", "").names,
+                None,
+            )?;
+            metric_navigation(output, "/run", query, &page)?;
             if names.is_empty() {
                 html! { output,
                     <p class="empty">
@@ -1800,11 +2013,11 @@ fn run_page(settings: &Settings, entry: &Entry<'_>, query: &Query) -> RenderResu
             for metric in names {
                 html::chart(
                     output,
-                    &metric,
+                    metric,
                     axis(query),
                     &[Series {
                         label: entry.id(),
-                        points: curve(&log, &metric, query),
+                        points: curve(&log, metric, query),
                     }],
                 )?;
             }
@@ -2320,7 +2533,7 @@ fn devices(settings: &Settings, query: &Query) -> RenderResult<String> {
                         .and_then(|record| record.get("time"))
                         .unwrap_or(0.0);
                     let age = (html::now() - latest).max(0.0);
-                    let names = metric_names(std::slice::from_ref(&stream.records), "");
+                    let names = metric_page(std::slice::from_ref(&stream.records), "", "").names;
                     html! { output,
                         <h2>{title}</h2>
                         <p class={if age >= 300.0 {
@@ -2391,9 +2604,16 @@ mod tests {
             .collect::<Vec<_>>();
         let expected = (0..32).map(|index| format!("metric_{index:02}")).collect::<Vec<_>>();
         for _ in 0..40 {
-            assert_eq!(metric_names(&[log.clone()], ""), expected);
-            assert_eq!(metric_names(&[log.clone()], "METRIC_39"), ["metric_39"]);
-            assert!(metric_names(&[log.clone()], "missing").is_empty());
+            assert_eq!(metric_page(&[log.clone()], "", "").names, expected);
+            assert_eq!(metric_page(&[log.clone()], "METRIC_39", "").names, ["metric_39"]);
+            assert!(metric_page(&[log.clone()], "missing", "").names.is_empty());
+            let first = metric_page(&[log.clone()], "", "");
+            let second = metric_page(&[log.clone()], "", first.next.as_deref().unwrap());
+            assert_eq!(
+                second.names,
+                (32..40).map(|index| format!("metric_{index:02}")).collect::<Vec<_>>()
+            );
+            assert!(second.next.is_none());
             let latest = data::latest_values(&log).unwrap();
             assert!(latest.0.windows(2).all(|pair| pair[0].0 < pair[1].0));
             log.rotate_left(1);
@@ -2416,7 +2636,7 @@ mod tests {
             "accuracy",
         ];
         for _ in 0..log.len() {
-            let names = metric_names(&[log.clone()], "");
+            let names = metric_page(&[log.clone()], "", "").names;
             assert_eq!(&names[..expected.len()], expected);
             let latest = data::latest_values(&log).unwrap();
             assert_eq!(
@@ -2661,6 +2881,32 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
     }
 
     #[test]
+    fn metric_aggregation_counts_only_reported_samples() {
+        let log = vec![
+            Record(vec![("step".into(), 1.0), ("train/tokens_per_second".into(), 1000.0)]),
+            Record(vec![("step".into(), 99.0), ("other".into(), 1.0)]),
+            Record(vec![("step".into(), 100.0), ("train/tokens_per_second".into(), 5000.0)]),
+        ];
+        for (aggregation, expected) in [
+            (MetricAggregation::Latest, 5000.0),
+            (MetricAggregation::Mean, 3000.0),
+            (MetricAggregation::Min, 1000.0),
+            (MetricAggregation::Max, 5000.0),
+        ] {
+            assert_eq!(
+                metric_value(&log, "train/tokens_per_second", aggregation),
+                Some(expected)
+            );
+            assert_eq!(metric_value(&log, "missing", aggregation), None);
+        }
+        let fixture = Fixture::new();
+        assert_eq!(
+            route(&fixture.settings, "/compare?run=a/same&aggregate=median").status,
+            400
+        );
+    }
+
+    #[test]
     fn comparison_performance_uses_latest_sparse_values_beyond_preview_limits() {
         let fixture = Fixture::new();
         let mut log = String::from("{\"step\":1,\"loss\":1,\"train/step_seconds_mean\":0.01,\"train/step_seconds_max\":0.04,\"train/tokens_per_second\":4000}\n");
@@ -2856,6 +3102,12 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
         assert_eq!(curve(&records, "loss", &query), [(20.0, 3.0)]);
         let query = Query::parse("axis=time").unwrap();
         assert!(curve(&records, "loss", &query).is_empty());
+        let query = Query::parse("smoothing=ema&smooth=3").unwrap();
+        assert_eq!(curve(&records, "loss", &query), [(1.0, 4.0), (2.0, 3.0)]);
+        let query = Query::parse("smoothing=ema&smooth=3&start=2").unwrap();
+        assert_eq!(curve(&records, "loss", &query), [(2.0, 3.0)]);
+        let query = Query::parse("smoothing=ema&smooth=1").unwrap();
+        assert_eq!(curve(&records, "loss", &query), [(1.0, 4.0), (2.0, 2.0)]);
     }
 
     #[test]
@@ -2912,7 +3164,14 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
     #[test]
     fn validates_query_bounds_and_metadata_limits() {
         let fixture = Fixture::new();
-        for query in ["smooth=0", "smooth=101", "minimum=NaN", "axis=bogus", "start=Infinity"] {
+        for query in [
+            "smooth=0",
+            "smooth=101",
+            "smoothing=bogus",
+            "minimum=NaN",
+            "axis=bogus",
+            "start=Infinity",
+        ] {
             assert_eq!(route(&fixture.settings, &format!("/?{query}")).status, 400);
         }
         let fields = (0..129)

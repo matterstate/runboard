@@ -94,7 +94,7 @@ def interactions(page: Page, address: str, log: Path) -> None:
     assert page.evaluate("original_main === document.querySelector('main')")
     page.unroute("**/run?*", edit_during_fetch)
     page.locator("#live-apply").click()
-    expect(page.locator("#live-apply")).to_be_hidden()
+    expect(page.locator("#live-apply")).to_be_disabled()
     page.wait_for_function("() => !updating && !dirty")
 
     figure = page.locator("figure").last
@@ -110,7 +110,7 @@ def interactions(page: Page, address: str, log: Path) -> None:
         "window.original_chart = document.querySelectorAll('svg.chart')[1]"
     )
     update(page)
-    expect(page.locator("#live-apply")).to_be_hidden()
+    expect(page.locator("#live-apply")).to_be_disabled()
     page.wait_for_function("() => !updating && !dirty")
     assert page.evaluate("original_chart === document.querySelectorAll('svg.chart')[1]")
     figure.get_by_role("button", name="Reset zoom").click()
@@ -228,6 +228,134 @@ def interactions(page: Page, address: str, log: Path) -> None:
     expect(page.locator(".empty")).to_contain_text("No matching metric")
 
 
+def recovery(page: Page, address: str) -> None:
+    page.goto(address + "/compare?run=demo/example&run=demo/run-50&metric=temperature")
+    values = page.locator("#metric-values")
+    expect(values.locator("tr")).to_have_count(33)
+    page.get_by_role("link", name="Next metrics", exact=True).click()
+    expect(values.locator("tr")).to_have_count(9)
+    expect(values.locator("tr").nth(1)).to_contain_text("device/temperature_32")
+    expect(values.locator("tr").nth(1).locator("td")).to_have_text(
+        ["32", "Not reported"]
+    )
+    page.get_by_role("link", name="First metrics", exact=True).click()
+    page.locator("#chart-filters input[name=metric]").fill("profile/block_39")
+    page.locator("#chart-filters button").first.click()
+    expect(values.locator("tr")).to_have_count(2)
+    expect(values.locator("tr").nth(1).locator("td")).to_have_text(
+        ["39", "Not reported"]
+    )
+
+    page.locator("#chart-filters input[name=metric]").fill("train/tokens_per_second")
+    for aggregation, expected in [
+        ("mean", "2500"),
+        ("min", "1000"),
+        ("max", "4000"),
+        ("latest", "4000"),
+    ]:
+        page.locator("select[name=aggregate]").select_option(aggregation)
+        page.locator("#chart-filters button").first.click()
+        expect(values.locator("tr").nth(1).locator("td")).to_have_text(
+            [expected, "Not reported"]
+        )
+        expect(
+            page.locator("#training-performance tr").nth(1).locator("td").last
+        ).to_have_text(expected)
+
+    page.locator("#chart-filters input[name=metric]").fill("loss")
+    page.locator("#chart-options summary").click()
+    page.locator("select[name=smoothing]").select_option("ema")
+    page.locator("input[name=smooth]").fill("3")
+    page.locator("#chart-filters button").first.click()
+    expect(page.locator("select[name=smoothing]")).to_have_value("ema")
+    titles = [
+        text.split(" ·", 1)[0]
+        for text in page.locator("figcaption").all_text_contents()
+    ]
+    samples = json.loads(
+        page.locator("figure")
+        .nth(titles.index("loss"))
+        .locator('polyline[data-label="demo/example"]')
+        .get_attribute("data-samples")
+    )
+    assert samples[0] == [1, 4]
+    assert samples[-1] == [6, 0.71875]
+    row = page.locator("#metric-values tr").filter(
+        has=page.get_by_role("rowheader", name="loss", exact=True)
+    )
+    expect(row.locator("td")).to_have_text(["0.25", "1"])
+
+    page.clock.install(time=0)
+    page.clock.pause_at(1000)
+    page.set_viewport_size({"width": 320, "height": 900})
+    page.goto(address + "/run?run=demo/example&metric=loss")
+    page.mouse.move(0, 0)
+    page.evaluate("Math.random = () => 0")
+    assert page.evaluate("[retry_delay(0), retry_delay(100)]") == [500, 15000]
+    page.evaluate("Math.random = () => 1")
+    assert page.evaluate("[retry_delay(0), retry_delay(100)]") == [1000, 30000]
+    page.evaluate("Math.random = () => 0")
+    geometry = page.locator("nav").bounding_box()
+    page.locator("#live-toggle").click()
+    for delay in [500, 1000, 2000, 4000, 8000, 15000, 15000]:
+        creations = page.evaluate("stream_creations")
+        page.evaluate("test_events.onerror()")
+        page.clock.run_for(delay - 1)
+        assert page.evaluate("stream_creations") == creations
+        page.clock.run_for(1)
+        assert page.evaluate("stream_creations") == creations + 1
+        expect(page.locator("#live-error")).to_be_hidden()
+        assert page.locator("nav").bounding_box() == geometry
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+    requests = []
+
+    def temporary(route: Route) -> None:
+        requests.append(route.request.url)
+        if len(requests) <= 2:
+            route.fulfill(status=503, body="temporarily unavailable")
+        else:
+            route.continue_()
+
+    page.route("**/run?**", temporary)
+    page.locator("main").evaluate('node => node.dataset.recoveryOld = "yes"')
+    page.locator("#live-toggle").click()
+    page.clock.run_for(250)
+    expect(page.locator("#live-apply")).to_be_enabled()
+    assert page.evaluate("snapshot_attempt") == 1
+    page.clock.run_for(999)
+    assert len(requests) == 1
+    page.clock.run_for(1)
+    expect(page.locator("#live-apply")).to_be_enabled()
+    assert page.evaluate("snapshot_attempt") == 2
+    page.clock.run_for(2000)
+    expect(page.locator("main[data-recovery-old]")).to_have_count(0)
+    assert len(requests) == 3
+    expect(page.locator("#live-error")).to_be_hidden()
+    assert page.locator("nav").bounding_box() == geometry
+    page.unroute("**/run?**", temporary)
+
+    def forbidden(route: Route) -> None:
+        route.fulfill(status=403, body="access denied")
+
+    page.route("**/run?**", forbidden)
+    update(page)
+    page.clock.run_for(250)
+    expect(page.locator("#live-error")).to_contain_text("HTTP 403")
+    creations = page.evaluate("stream_creations")
+    page.clock.run_for(120000)
+    assert page.evaluate("stream_creations") == creations
+    assert page.locator("nav").bounding_box() == geometry
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.unroute("**/run?**", forbidden)
+    page.locator("main").evaluate('node => node.dataset.retryOld = "yes"')
+    page.locator("#live-retry").click()
+    page.clock.run_for(250)
+    expect(page.locator("main[data-retry-old]")).to_have_count(0)
+    expect(page.locator("#live-error")).to_be_hidden()
+    page.clock.resume()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="runboard-browser-") as directory:
         root = Path(directory)
@@ -244,7 +372,7 @@ def main() -> None:
                         "eval/loss": 5.5 - step,
                         "train/step_seconds_mean": 0.025,
                         "train/step_seconds_max": 0.04,
-                        "train/tokens_per_second": 4000,
+                        "train/tokens_per_second": 1000 * step,
                         **{f"profile/block_{index:02}": index for index in range(40)},
                         **{
                             f"device/temperature_{index:02}": index
@@ -314,15 +442,22 @@ def main() -> None:
                         page.on("pageerror", lambda error: errors.append(str(error)))
                         page.add_init_script("""
                         window.EventSource = class extends EventTarget {
-                            constructor() { super(); window.test_events = this; }
+                            constructor() {
+                                super(); window.test_events = this;
+                                window.stream_creations =
+                                    (window.stream_creations || 0) + 1;
+                                queueMicrotask(() => this.onopen?.());
+                            }
+                            close() {}
                         };""")
                         interactions(page, address, log)
+                        recovery(page, address)
                         assert not errors, errors
                         # Also exercise the real SSE connection.
                         live = browser.new_page()
                         live.goto(address + "/run?run=demo/example&metric=loss")
-                        expect(live.locator("#live-status")).to_have_text(
-                            "Connected", timeout=10000
+                        expect(live.locator("#live-status")).to_have_attribute(
+                            "title", "Connected", timeout=10000
                         )
                         with log.open("a") as output:
                             output.write('{"step":7,"loss":0.125}\n')

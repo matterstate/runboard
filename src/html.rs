@@ -66,19 +66,29 @@ pub fn now() -> f64 {
 fn Navigation() -> RenderResult {
     html! {
         <nav>
-            <a href="/">"Runs"</a>
-            <a href="/jobs">"Queue"</a>
-            <a href="/device">"Devices"</a>
-            <a href="/diagnostics">"Inputs"</a>
-            <span id="live-status" class="dim" role="status">
-                "Connecting…"
-            </span>
-            <button id="live-toggle" type="button" aria-pressed="false">
-                "Pause updates"
-            </button>
-            <button id="live-apply" type="button" hidden>
-                "Apply updates"
-            </button>
+            <div class="nav-links">
+                <a href="/">"Runs"</a>
+                <a href="/jobs">"Queue"</a>
+                <a href="/device">"Devices"</a>
+                <a href="/diagnostics">"Inputs"</a>
+            </div>
+            <div class="live-controls">
+                <span id="live-status" class="dim" title="Connecting in the background">
+                    "Auto updates"
+                </span>
+                <button id="live-toggle" type="button" aria-pressed="false">
+                    "Pause updates"
+                </button>
+                <button id="live-apply" type="button" disabled>
+                    "Apply updates"
+                </button>
+            </div>
+            <div id="live-error" role="alert" hidden>
+                <span id="live-error-message"></span>
+                <button id="live-retry" type="button">
+                    "Retry"
+                </button>
+            </div>
         </nav>
     }
 }
@@ -128,8 +138,13 @@ body:has(#run-selection) { max-width: none; }
 .table-scroll { overflow-x: auto; }
 .table-scroll table { display: table; width: 100%; }
 nav, .actions { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1.25rem; }
-nav { padding-bottom: 1rem; border-bottom: 1px solid #ddd; }
-#live-status { margin-left: auto; }
+nav { display: grid; grid-template-columns: minmax(0, 1fr) auto; padding-bottom: 1rem; border-bottom: 1px solid #ddd; }
+.nav-links { display: flex; flex-wrap: wrap; gap: .75rem 1.25rem; }
+.live-controls { display: grid; grid-template-columns: minmax(0, 1fr) 8.5rem 8.5rem; align-items: center; gap: .5rem; min-width: 0; }
+#live-status { min-width: 0; overflow-wrap: anywhere; }
+#live-error { position: fixed; inset: auto 1rem 1rem; z-index: 10; max-width: 40rem; margin-inline: auto; padding: .75rem; border: 1px solid #a00020; background: #fff0e8; overflow-wrap: anywhere; }
+#metric-values th { min-width: 9rem; max-width: 20rem; white-space: normal; overflow-wrap: anywhere; }
+.metric-name { min-width: 12rem; max-width: 20rem; overflow-wrap: anywhere; }
 h1 { margin: 1rem 0; line-height: 1.2; overflow-wrap: anywhere; }
 h2 { margin: 2rem 0 .75rem; font-size: 1.15rem; }
 form { margin: 1.5rem 0; }
@@ -157,6 +172,10 @@ figcaption { margin-bottom: .4rem; font-weight: 600; }
 .plot { display: block; width: 100%; height: 252px; background: #f5f7fa; }
 .plot text { font: 12px system-ui,sans-serif; fill: #526070; }
 @media (max-width: 40rem) {
+    nav { grid-template-columns: minmax(0, 1fr); }
+    .live-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .live-controls button { height: 3.25rem; }
+    #live-status { grid-column: 1 / -1; min-height: 1.5rem; }
     .table-scroll .run-name { min-width: 10rem; max-width: 14rem; overflow-wrap: anywhere; }
     .plot [data-x-tick="0.25"], .plot [data-x-tick="0.75"] { display: none; }
 }
@@ -615,15 +634,82 @@ const LIVE_SCRIPT: &str = r##"
 const live_status = document.querySelector("#live-status");
 const live_toggle = document.querySelector("#live-toggle");
 const live_apply = document.querySelector("#live-apply");
-const updates = new EventSource("/events");
+const live_error = document.querySelector("#live-error");
+const live_error_message = document.querySelector("#live-error-message");
+const live_retry = document.querySelector("#live-retry");
+let updates = null;
+let reconnect_timer = null;
+let reconnect_attempt = 0;
+let opened_at = Date.now();
+let failure = null;
 let dirty = false;
 let updating = false;
 let scheduled = null;
 let sequence = 0n;
 let status_time = Date.now();
-let snapshot_failed = false;
+let snapshot_attempt = 0;
 let paused = false;
-let connection_status = "Connecting…";
+let connection_note = "Connecting in the background";
+
+function retry_delay(attempt) {
+    const limit = Math.min(30000, 1000 * 2 ** Math.min(attempt, 5));
+    return Math.round(limit / 2 + Math.random() * limit / 2);
+}
+
+function stop_updates(message) {
+    failure = message;
+    updates?.close();
+    updates = null;
+    if (reconnect_timer !== null) clearTimeout(reconnect_timer);
+    reconnect_timer = null;
+    if (scheduled !== null) clearTimeout(scheduled);
+    scheduled = null;
+    update_status();
+}
+
+function retry_stream() {
+    updates?.close();
+    updates = null;
+    connection_note = "Reconnecting automatically; showing the last available data";
+    if (failure || reconnect_timer !== null) return;
+    reconnect_timer = setTimeout(connect_stream, retry_delay(reconnect_attempt));
+    reconnect_attempt = Math.min(reconnect_attempt + 1, 5);
+    update_status();
+}
+
+function connect_stream() {
+    reconnect_timer = null;
+    if (failure || updates) return;
+    if (typeof EventSource !== "function") {
+        stop_updates("This browser cannot receive live updates. Use a browser with EventSource support.");
+        return;
+    }
+    try {
+        const source = new EventSource("/events");
+        updates = source;
+        status_time = Date.now();
+        source.onopen = () => { if (updates === source) opened_at = Date.now(); };
+        source.addEventListener("resync", () => { if (updates === source) { sequence = 0n; schedule_snapshot(); } });
+        source.addEventListener("update", event => {
+            if (updates !== source) return;
+            if (!/^[0-9]{1,20}$/.test(event.lastEventId)) { retry_stream(); return; }
+            const next = BigInt(event.lastEventId);
+            if (next <= sequence) return;
+            sequence = next;
+            schedule_snapshot();
+        });
+        source.addEventListener("status", event => {
+            if (updates !== source) return;
+            status_time = Date.now();
+            if (status_time - opened_at >= 15000) reconnect_attempt = 0;
+            connection_note = event.data === "live" ? "Connected" : event.data === "input-error" ? "Some inputs are unavailable; see Inputs" : "Waiting for source data; retrying automatically";
+            update_status();
+        });
+        source.onerror = () => { if (updates === source) { retry_stream(); schedule_snapshot(); } };
+    } catch (_) {
+        retry_stream();
+    }
+}
 
 function interacting(ignore_pause = false) {
     if (drag || (paused && !ignore_pause) || document.hidden) return true;
@@ -634,18 +720,20 @@ function interacting(ignore_pause = false) {
 }
 
 function update_status() {
-    const label = snapshot_failed ? "Update delayed" : connection_status;
-    const text = label + (paused ? " · updates paused" : dirty ? " · updates waiting" : "");
+    const text = paused ? "Updates paused" : "Auto updates";
     if (live_status.textContent !== text) live_status.textContent = text;
-    live_apply.hidden = !dirty;
-    live_apply.disabled = updating;
+    live_status.title = failure || (snapshot_attempt > 0 ? "Refresh delayed; retrying automatically with the current page preserved" : connection_note);
+    live_apply.disabled = !dirty || updating || failure !== null;
+    live_error.hidden = failure === null;
+    const message = failure || "";
+    if (live_error_message.textContent !== message) live_error_message.textContent = message;
 }
 
 function schedule_snapshot() {
     dirty = true;
     update_status();
-    if (scheduled !== null || updating || interacting()) return;
-    scheduled = setTimeout(update_snapshot, 250);
+    if (failure || scheduled !== null || updating || interacting()) return;
+    scheduled = setTimeout(update_snapshot, snapshot_attempt > 0 ? retry_delay(snapshot_attempt) : 250);
 }
 
 function field_key(element, form) {
@@ -656,15 +744,22 @@ function field_key(element, form) {
 async function update_snapshot(force = false) {
     if (scheduled !== null) clearTimeout(scheduled);
     scheduled = null;
-    if (updating || interacting(force) || (!dirty && !force)) return;
+    if (failure || updating || interacting(force) || (!dirty && !force)) return;
     updating = true;
     dirty = false;
     update_status();
     try {
         const response = await fetch(location.pathname + location.search, {signal: AbortSignal.timeout(10000)});
-        if (!response.ok) throw new Error("snapshot failed");
+        if ([400, 401, 403, 404, 410, 413, 422].includes(response.status)) {
+            stop_updates("This view cannot refresh (HTTP " + response.status + "). Check access or the selected runs, then retry.");
+            return;
+        }
+        if (!response.ok) throw new Error("snapshot temporarily unavailable");
         const markup = await response.text();
-        if (markup.length > 33554432) throw new Error("snapshot too large");
+        if (markup.length > 33554432) {
+            stop_updates("This view exceeds the refresh size limit. Select fewer runs or filter metrics, then reload.");
+            return;
+        }
         if (interacting(force)) { dirty = true; return; }
         const next = new DOMParser().parseFromString(markup, "text/html").querySelector("main");
         const current = document.querySelector("main");
@@ -709,32 +804,35 @@ async function update_snapshot(force = false) {
         observe_charts();
         next.querySelectorAll("table,.table-scroll").forEach((table, index) => { table.scrollLeft = table_scroll[index] || 0; });
         scrollTo(scroll.x, scroll.y);
-        snapshot_failed = false;
+        snapshot_attempt = 0;
     } catch (_) {
         dirty = true;
-        snapshot_failed = true;
+        snapshot_attempt = Math.min(snapshot_attempt + 1, 5);
     } finally {
         updating = false;
         update_status();
-        if (dirty && !interacting()) {
-            scheduled = setTimeout(() => { scheduled = null; schedule_snapshot(); }, 1000);
+        if (dirty && !failure && !interacting()) {
+            scheduled = setTimeout(() => { scheduled = null; update_snapshot(); }, retry_delay(snapshot_attempt));
         }
     }
 }
 
-updates.addEventListener("resync", () => { sequence = 0n; schedule_snapshot(); });
-updates.addEventListener("update", event => {
-    const next = BigInt(event.lastEventId || 0);
-    if (next <= sequence) return;
-    sequence = next;
+live_retry.addEventListener("click", () => {
+    failure = null;
+    reconnect_attempt = 0;
+    snapshot_attempt = 0;
+    connect_stream();
     schedule_snapshot();
 });
-updates.addEventListener("status", event => {
-    status_time = Date.now();
-    connection_status = event.data === "live" ? "Connected" : event.data === "input-error" ? "Some inputs unavailable · see Inputs" : "Reconnecting…";
-    update_status();
+window.addEventListener("online", () => {
+    if (failure) return;
+    if (reconnect_timer !== null) clearTimeout(reconnect_timer);
+    reconnect_timer = null;
+    connect_stream();
+    schedule_snapshot();
 });
-updates.onerror = () => { connection_status = "Reconnecting…"; update_status(); };
+connect_stream();
+update_status();
 live_toggle.addEventListener("click", () => {
     paused = !paused;
     live_toggle.setAttribute("aria-pressed", String(paused));
@@ -752,7 +850,7 @@ document.addEventListener("pointercancel", resume_snapshot);
 document.addEventListener("pointerout", resume_snapshot);
 document.addEventListener("click", event => { if (event.target.closest("[data-reset]")) schedule_snapshot(); });
 setInterval(() => {
-    if (Date.now() - status_time > 15000) { connection_status = "Disconnected · data may be stale"; update_status(); }
+    if (updates && Date.now() - status_time > 20000) retry_stream();
     if (interacting()) return;
     document.querySelectorAll("time[data-time]").forEach(element => {
         const seconds = Math.max(0, Math.floor(Date.now() / 1000 - Number(element.dataset.time)));
