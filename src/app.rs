@@ -913,7 +913,7 @@ fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
                                                     value=&id
                                                 />
                                             </td>
-                                            <td>
+                                            <td class="run-name">
                                                 <a href=format!("/run?run={}", encode(&id))>{id}</a>
                                                 {|output| {
                                                     if let Some(tasks) = task_links.get(&id) {
@@ -1059,7 +1059,7 @@ fn controls(output: &mut Output, selected: &[Entry<'_>], query: &Query, metrics:
                 </p>
             </details>
             <p class="dim">
-                "Metric names match by substring, ignoring case. Blank shows up to 32 metrics: loss, other training metrics, then telemetry; alphabetical within each group."
+                "Metric names match by substring, ignoring case. Blank shows up to 32 metrics: loss, step timing and throughput, other training metrics, then telemetry; alphabetical within each group."
             </p>
         </form>
     }
@@ -1381,6 +1381,49 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> RenderRes
                 }
             }
             html! { output,
+                <h2>"Training performance"</h2>
+                <p>
+                    "Latest reported values from each trainer, not recomputed whole-run averages. Step durations are converted from seconds to milliseconds. Not reported means no valid value was found in the retained log history."
+                </p>
+                <div class="table-scroll" role="region" aria-label="Training performance" tabindex="0">
+                    <table id="training-performance">
+                        <tr>
+                            <th>"Run"</th>
+                            <th>"Mean ms/step"</th>
+                            <th>"Max ms/step"</th>
+                            <th>"Tokens/sec"</th>
+                        </tr>
+                        {|output| {
+                            for (entry, log) in selected.iter().zip(&logs) {
+                                html! { output,
+                                    <tr>
+                                        <td class="run-name">{entry.id()}</td>
+                                        {|output| {
+                                            for (key, scale) in [
+                                                ("train/step_seconds_mean", 1000.0),
+                                                ("train/step_seconds_max", 1000.0),
+                                                ("train/tokens_per_second", 1.0),
+                                            ] {
+                                                let value = log
+                                                    .iter()
+                                                    .rev()
+                                                    .find_map(|record| record.get(key))
+                                                    .filter(|value| *value >= 0.0)
+                                                    .map(|value| value * scale)
+                                                    .filter(|value| value.is_finite())
+                                                    .map(number)
+                                                    .unwrap_or_else(|| "Not reported".into());
+                                                html! { output, <td>{value}</td> }?;
+                                            }
+                                            Ok(())
+                                        }}
+                                    </tr>
+                                }?;
+                            }
+                            Ok(())
+                        }}
+                    </table>
+                </div>
                 <table>
                     <tr>
                         <th>"Run"</th>
@@ -2358,13 +2401,33 @@ mod tests {
         let mut log = (0..40)
             .map(|index| Record(vec![(format!("device/temperature_{index:02}"), f64::from(index))]))
             .collect::<Vec<_>>();
-        log.push(Record(vec![("loss".into(), 0.5), ("accuracy".into(), 0.9)]));
+        log.push(Record(vec![
+            ("loss".into(), 0.5),
+            ("accuracy".into(), 0.9),
+            ("train/step_seconds_mean".into(), 0.025),
+            ("train/step_seconds_max".into(), 0.04),
+            ("train/tokens_per_second".into(), 4000.0),
+        ]));
+        let expected = [
+            "loss",
+            "train/step_seconds_max",
+            "train/step_seconds_mean",
+            "train/tokens_per_second",
+            "accuracy",
+        ];
         for _ in 0..log.len() {
             let names = metric_names(&[log.clone()], "");
-            assert_eq!(&names[..2], ["loss", "accuracy"]);
+            assert_eq!(&names[..expected.len()], expected);
             let latest = data::latest_values(&log).unwrap();
-            assert_eq!(latest.0[0].0, "loss");
-            assert_eq!(latest.0[1].0, "accuracy");
+            assert_eq!(
+                latest
+                    .0
+                    .iter()
+                    .take(expected.len())
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
             log.rotate_left(1);
         }
     }
@@ -2595,6 +2658,32 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
         assert!(page.find("a/same").unwrap() < page.find("b/same").unwrap());
         let page = fixture.text("/?sort=recent");
         assert!(page.find("b/same").unwrap() < page.find("a/same").unwrap());
+    }
+
+    #[test]
+    fn comparison_performance_uses_latest_sparse_values_beyond_preview_limits() {
+        let fixture = Fixture::new();
+        let mut log = String::from("{\"step\":1,\"loss\":1,\"train/step_seconds_mean\":0.01,\"train/step_seconds_max\":0.04,\"train/tokens_per_second\":4000}\n");
+        for index in 0..140 {
+            log.push_str(&format!("{{\"step\":{},\"profile/block_{index}\":1}}\n", index + 2));
+        }
+        log.push_str("{\"step\":142,\"train/step_seconds_mean\":0.025}\n");
+        fs::write(fixture.root.join("a/reports/same_train.log"), log).unwrap();
+        for path in [
+            "/compare?run=a/same&run=b/same&metric=loss",
+            "/report?run=a/same&run=b/same",
+        ] {
+            let page = fixture.text(path);
+            let table = page
+                .split_once("<table id=\"training-performance\">")
+                .unwrap()
+                .1
+                .split_once("</table>")
+                .unwrap()
+                .0;
+            assert!(table.contains("<td>25</td><td>40</td><td>4000</td>"));
+            assert_eq!(table.matches("Not reported").count(), 3);
+        }
     }
 
     #[test]

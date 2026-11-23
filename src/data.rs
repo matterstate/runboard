@@ -84,6 +84,7 @@ pub struct MonitorEvent {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MetricKind {
     Loss,
+    Performance,
     Training,
     Telemetry,
 }
@@ -98,6 +99,11 @@ pub fn metric_order(name: &str) -> (MetricKind, &str) {
         .is_some_and(|part| part.eq_ignore_ascii_case("loss"))
     {
         MetricKind::Loss
+    } else if matches!(
+        name,
+        "train/step_seconds_mean" | "train/step_seconds_max" | "train/tokens_per_second"
+    ) {
+        MetricKind::Performance
     } else {
         MetricKind::Training
     };

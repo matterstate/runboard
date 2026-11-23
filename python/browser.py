@@ -152,7 +152,33 @@ def interactions(page: Page, address: str, log: Path) -> None:
     page.get_by_role("button", name="Compare selected", exact=True).click()
     assert page.url.count("run=") == 2
     assert "/compare?" in page.url
-    page.goto(page.url + "&metric=missing")
+    comparison_url = page.url
+    performance = page.locator("#training-performance")
+    expect(performance.locator("th")).to_have_text(
+        ["Run", "Mean ms/step", "Max ms/step", "Tokens/sec"]
+    )
+    expect(performance.locator("tr").nth(1).locator("td")).to_have_text(
+        ["demo/example", "25", "40", "4000"]
+    )
+    expect(performance.locator("tr").nth(2)).to_contain_text("Not reported")
+    titles = [
+        title.split(" ·", 1)[0]
+        for title in page.locator("figure figcaption").all_text_contents()
+    ]
+    assert {
+        "train/step_seconds_mean",
+        "train/step_seconds_max",
+        "train/tokens_per_second",
+    } <= set(titles)
+    for width in [390, 320]:
+        page.set_viewport_size({"width": width, "height": 900})
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        region = page.get_by_role("region", name="Training performance", exact=True)
+        region.evaluate("node => node.scrollLeft = node.scrollWidth")
+        assert region.evaluate("node => node.scrollLeft > 0")
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.goto(comparison_url + "&metric=missing")
+    expect(page.locator("#training-performance tr").nth(1)).to_contain_text("4000")
     expect(page.locator(".empty")).to_contain_text("No matching metric")
     page.goto(address + "/?name=example")
     expect(page.locator('input[name=run][value="demo/example"]')).to_be_checked()
@@ -216,6 +242,10 @@ def main() -> None:
                         "loss": 5 - step,
                         "accuracy": step / 10,
                         "eval/loss": 5.5 - step,
+                        "train/step_seconds_mean": 0.025,
+                        "train/step_seconds_max": 0.04,
+                        "train/tokens_per_second": 4000,
+                        **{f"profile/block_{index:02}": index for index in range(40)},
                         **{
                             f"device/temperature_{index:02}": index
                             for index in range(40)
