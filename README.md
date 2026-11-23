@@ -113,11 +113,14 @@ prototype.
 
 ## Browsing runs
 
-Search, project and state filters are visible on the runs page. The default
-active-first order uses run names as a stable tie-breaker; choose `recent` to
-sort by report age. Status counts respect the project filter. Comparison
-selections persist across filters and pages in tab-local session storage, up to
-eight runs; **Clear selection** removes them.
+Search, project and state filters are visible on the runs page. Runs default to
+`recent`: most recently updated first, with run names breaking ties. Choose
+`active` to keep running and slow-reporting runs first instead. Pueue task
+numbers appear under run names and link to the queue when the task is in the
+current snapshot. Older task numbers remain visible when recorded in `task_id`
+metadata. Status counts respect the project filter. Comparison selections
+persist across filters and pages in tab-local session storage, up to eight runs;
+**Clear selection** removes them.
 
 Metric previews and default charts put loss first, then other training metrics,
 then `host/` and `device/` telemetry, alphabetically within each group. This

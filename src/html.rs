@@ -157,6 +157,7 @@ figcaption { margin-bottom: .4rem; font-weight: 600; }
 .plot { display: block; width: 100%; height: 252px; background: #f5f7fa; }
 .plot text { font: 12px system-ui,sans-serif; fill: #526070; }
 @media (max-width: 40rem) {
+    .table-scroll td:nth-child(2) { min-width: 10rem; max-width: 14rem; overflow-wrap: anywhere; }
     .plot [data-x-tick="0.25"], .plot [data-x-tick="0.75"] { display: none; }
 }
 .chart { touch-action: pan-y; }

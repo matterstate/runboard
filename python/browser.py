@@ -129,6 +129,14 @@ def interactions(page: Page, address: str, log: Path) -> None:
     page.wait_for_function("() => original_main !== document.querySelector('main')")
 
     page.goto(address)
+    expect(page.locator("select[name=sort]")).to_have_value("recent")
+    assert page.locator("#run-selection input[name=run]").evaluate_all(
+        "nodes => nodes.slice(0, 3).map(node => node.value)"
+    ) == ["demo/example", "demo/run-50", "demo/run-49"]
+    task = page.get_by_role("link", name="Pueue #42", exact=True)
+    task.click()
+    expect(page.locator("#task-demo-42")).to_contain_text("Running")
+    page.goto(address + "/?sort=name")
     expect(page.locator("input[name=name]")).to_be_visible()
     preview = (
         page.locator("table tr")
@@ -166,7 +174,7 @@ def interactions(page: Page, address: str, log: Path) -> None:
 
     for path in ["/?name=example", "/run?run=demo/example&metric=loss"]:
         page.goto(address + path)
-        for width in [1600, 1280, 390]:
+        for width in [1600, 1280, 768, 390, 320]:
             page.set_viewport_size({"width": width, "height": 900})
             page.wait_for_function("""() => {
                 const plot = document.querySelector('svg.plot');
@@ -184,6 +192,12 @@ def interactions(page: Page, address: str, log: Path) -> None:
                         (innerWidth < 600 ||
                             Math.abs(row.width - form.clientWidth) < 2);
                 }"""), f"runs table does not fill available width at {width}px"
+    page.goto(address + "/?name=mobile")
+    name_cell = page.locator("#run-selection table tr").nth(1).locator("td").nth(1)
+    assert name_cell.bounding_box()["width"] <= 240
+    expect(name_cell).to_contain_text("Pueue #43")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.screenshot(path=str(log.parent / "mobile-runs.png"), full_page=True)
     page.goto(address + "/run?run=demo/example&metric=missing")
     expect(page.locator(".empty")).to_contain_text("No matching metric")
 
@@ -214,8 +228,21 @@ def main() -> None:
         )
         for index in range(51):
             name = f"run-{index:02}"
-            (reports / f"{name}_train.log").write_text('{"step":1,"loss":1}\n')
+            path = reports / f"{name}_train.log"
+            path.write_text('{"step":1,"loss":1}\n')
+            modified = time.time() - 120 + index
+            os.utime(path, (modified, modified))
             (reports / f"{name}_TRAINED").write_text("train exit 0")
+        name = "mobile-" + "long-run-name-" * 12
+        path = reports / f"{name}_train.log"
+        path.write_text('{"step":1,"loss":1}\n')
+        os.utime(path, (1, 1))
+        (reports / f"{name}_meta.json").write_text('{"task_id":43}')
+        (reports / "queue.json").write_text(
+            json.dumps(
+                {"tasks": {"42": {"label": "demo/example", "status": "Running"}}}
+            )
+        )
         address = f"http://127.0.0.1:{available_port()}"
         with (root / "server.log").open("w") as output:
             process = subprocess.Popen(

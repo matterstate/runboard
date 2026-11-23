@@ -440,6 +440,19 @@ impl<'a> Entry<'a> {
             }
         }
     }
+    fn task_id(&self) -> Option<String> {
+        let id = match self.value("task_id")? {
+            Scalar::Number(value) if (0.0..=9_007_199_254_740_991.0).contains(value) && value.fract() == 0.0 => {
+                format!("{value:.0}")
+            }
+            Scalar::Text(value) => value.clone(),
+            _ => return None,
+        };
+        if id.is_empty() || id.len() > 16 || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        Some(id)
+    }
     fn field(&self, key: &str) -> String {
         self.value(key).map(inputs::scalar).unwrap_or_default()
     }
@@ -629,6 +642,23 @@ pub fn export(settings: &Settings) -> Result<(), String> {
 
 fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
     let mut runs = entries(settings);
+    let mut queue_warnings = Vec::new();
+    let mut task_links: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for (source, snapshot) in queue_snapshots(settings, &mut queue_warnings) {
+        match queue::tasks(&snapshot) {
+            Ok(tasks) => {
+                for task in tasks {
+                    if let Some(entry) = queue_run(settings, &source, &task, &runs) {
+                        task_links
+                            .entry(entry.id())
+                            .or_default()
+                            .push((source.clone(), task.id));
+                    }
+                }
+            }
+            Err(error) => queue_warnings.push(format!("{source}: {error}")),
+        }
+    }
     let capped = runs.len() == 4096;
     runs.retain(|entry| query.get("project").is_empty() || entry.project.name == query.get("project"));
     let no_reports = runs.is_empty();
@@ -673,11 +703,11 @@ fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 _ => std::cmp::Ordering::Equal,
             },
-            "recent" => b.stage.modified.cmp(&a.stage.modified),
-            _ => {
+            "active" => {
                 let active = |entry: &Entry<'_>| matches!(entry.state(), RunState::Running | RunState::Slow);
                 active(b).cmp(&active(a))
             }
+            _ => b.stage.modified.cmp(&a.stage.modified),
         };
         let order = if query.get("descending") == "1" {
             order.reverse()
@@ -696,6 +726,7 @@ fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
     html::page(
         "Runs",
         |output| {
+            notice(output, &queue_warnings)?;
             html! { output,
                 <div class="actions status-summary">
                     {|output| {
@@ -767,7 +798,7 @@ fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
                                             output,
                                             &["active", "recent", "name", "metric"],
                                             if query.get("sort").is_empty() {
-                                                "active"
+                                                "recent"
                                             } else {
                                                 query.get("sort")
                                             },
@@ -884,7 +915,26 @@ fn index(settings: &Settings, query: &Query) -> RenderResult<String> {
                                             </td>
                                             <td>
                                                 <a href=format!("/run?run={}", encode(&id))>{id}</a>
-                                                {|output| notice(output, &entry.warnings)}
+                                                {|output| {
+                                                    if let Some(tasks) = task_links.get(&id) {
+                                                        for (source, task_id) in tasks {
+                                                            html! { output,
+                                                                <div class="queue-task">
+                                                                    <a href=format!(
+                                                                        "/jobs?completed=1#task-{}-{}",
+                                                                        encode(source),
+                                                                        encode(task_id),
+                                                                    )>"Pueue #"{task_id}</a>
+                                                                </div>
+                                                            }?;
+                                                        }
+                                                    } else if let Some(task_id) = entry.task_id() {
+                                                        html! { output,
+                                                            <div class="queue-task">"Pueue #"{task_id}</div>
+                                                        }?;
+                                                    }
+                                                    notice(output, &entry.warnings)
+                                                }}
                                             </td>
                                             <td>
                                                 <span class="state" data-state=entry.state().as_str()>
@@ -1952,9 +2002,7 @@ fn queue_body(settings: &Settings) -> Result<Option<String>, String> {
     Ok(None)
 }
 
-fn jobs(settings: &Settings, query: &Query) -> RenderResult<String> {
-    let runs = entries(settings);
-    let mut warnings = Vec::new();
+fn queue_snapshots(settings: &Settings, warnings: &mut Vec<String>) -> Vec<(String, String)> {
     let mut snapshots = Vec::new();
     match queue_body(settings) {
         Ok(Some(body)) => snapshots.push(("shared".to_string(), body)),
@@ -1972,6 +2020,36 @@ fn jobs(settings: &Settings, query: &Query) -> RenderResult<String> {
         }
         Err(error) => warnings.push(error),
     }
+    snapshots
+}
+
+fn queue_run<'a>(
+    settings: &Settings,
+    source: &str,
+    task: &queue::Task,
+    runs: &'a [Entry<'a>],
+) -> Option<&'a Entry<'a>> {
+    let global = settings.queue.is_some() || settings.pueue.is_some();
+    let mut matches = runs.iter().filter(|entry| {
+        let local = source == entry.project.name
+            || settings.projects.len() == 1
+            || Path::new(&task.directory).starts_with(&entry.project.root);
+        task.label == entry.id()
+            || ((global || source == entry.project.name) && entry.task_id().as_deref() == Some(task.id.as_str()))
+            || (local && task.label == entry.stage.name)
+    });
+    let first = matches.next();
+    if matches.next().is_none() {
+        first
+    } else {
+        None
+    }
+}
+
+fn jobs(settings: &Settings, query: &Query) -> RenderResult<String> {
+    let runs = entries(settings);
+    let mut warnings = Vec::new();
+    let snapshots = queue_snapshots(settings, &mut warnings);
     let sources: Vec<(String, PathBuf)> = match &settings.jobs {
         Some(path) => vec![("shared".into(), path.clone())],
         None => settings
@@ -2057,20 +2135,7 @@ fn jobs(settings: &Settings, query: &Query) -> RenderResult<String> {
                                 if !query.get("group").is_empty() && task.group != query.get("group") {
                                     continue;
                                 }
-                                let global = settings.queue.is_some() || settings.pueue.is_some();
-                                let mut matches = runs
-                                    .iter()
-                                    .filter(|entry| {
-                                        let local = *source == entry.project.name
-                                            || settings.projects.len() == 1
-                                            || Path::new(&task.directory).starts_with(&entry.project.root);
-                                        task.label == entry.id()
-                                            || ((global || *source == entry.project.name)
-                                                && entry.field("task_id") == task.id)
-                                            || (local && task.label == entry.stage.name)
-                                    });
-                                let first = matches.next();
-                                let associated = if matches.next().is_none() { first } else { None };
+                                let associated = queue_run(settings, source, &task, &runs);
                                 html! { output,
                                     <tr id=format!("task-{}-{}", encode(source), encode(&task.id))>
                                         <td>{source}"/"{task.id}</td>
@@ -2517,7 +2582,7 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
     }
 
     #[test]
-    fn active_runs_precede_newer_completed_runs_by_default() {
+    fn recent_runs_are_default_and_active_sort_is_explicit() {
         let fixture = Fixture::new();
         fs::write(fixture.root.join("b/reports/same_TRAINED"), "train exit 0").unwrap();
         let completed = fs::File::open(fixture.root.join("b/reports/same_train.log")).unwrap();
@@ -2525,6 +2590,8 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
             .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::now() + Duration::from_secs(60)))
             .unwrap();
         let page = fixture.text("/");
+        assert!(page.find("b/same").unwrap() < page.find("a/same").unwrap());
+        let page = fixture.text("/?sort=active");
         assert!(page.find("a/same").unwrap() < page.find("b/same").unwrap());
         let page = fixture.text("/?sort=recent");
         assert!(page.find("b/same").unwrap() < page.find("a/same").unwrap());
@@ -2597,10 +2664,15 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
         assert!(page.contains("/run?run=a%2Fsame"));
         assert!(page.contains("#task-a-3"));
         assert!(!page.contains("hidden-command"));
+        assert!(fixture.text("/").contains("/jobs?completed=1#task-a-7"));
+        assert!(fixture.text("/").contains("Pueue #7"));
+        assert!(fixture.text("/?project=b").contains("Pueue #7"));
         fixture.settings.queue = Some(fixture.root.join("a/reports/queue.json"));
         assert!(!fixture.text("/jobs").contains("/run?run=a%2Fsame"));
+        assert!(!fixture.text("/?project=a").contains("/jobs?completed=1#task-shared-7"));
         fs::write(fixture.root.join("b/reports/same_meta.json"), r#"{"task_id":8}"#).unwrap();
         assert!(fixture.text("/jobs").contains("/run?run=a%2Fsame"));
+        assert!(fixture.text("/").contains("/jobs?completed=1#task-shared-7"));
     }
 
     #[test]
