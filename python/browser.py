@@ -194,7 +194,7 @@ def interactions(page: Page, address: str, log: Path) -> None:
                 }"""), f"runs table does not fill available width at {width}px"
     page.goto(address + "/?name=mobile")
     name_cell = page.locator("#run-selection table tr").nth(1).locator("td").nth(1)
-    assert name_cell.bounding_box()["width"] <= 240
+    assert 160 <= name_cell.bounding_box()["width"] <= 240
     expect(name_cell).to_contain_text("Pueue #43")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     page.screenshot(path=str(log.parent / "mobile-runs.png"), full_page=True)
