@@ -318,6 +318,21 @@ def recovery(page: Page, address: str) -> None:
         has=page.get_by_role("rowheader", name="loss", exact=True)
     )
     expect(row.locator("td")).to_have_text(["0.25", "1"])
+    loss.locator("[data-y-tick]").first.evaluate(
+        "label => { label.textContent = '1.32984939427'; }"
+    )
+    page.set_viewport_size({"width": 390, "height": 900})
+    page.wait_for_timeout(100)
+    page.set_viewport_size({"width": 320, "height": 900})
+    page.wait_for_timeout(100)
+    assert loss.locator("svg.plot").evaluate(
+        "plot => [...plot.querySelectorAll('[data-y-tick]')].every(label => "
+        "label.getBoundingClientRect().left >= plot.getBoundingClientRect().left)"
+    ), loss.locator("svg.plot").evaluate(
+        "plot => ({left: plot.getBoundingClientRect().left, "
+        "labels: [...plot.querySelectorAll('[data-y-tick]')].map(label => "
+        "({text: label.textContent, left: label.getBoundingClientRect().left}))})"
+    )
 
     page.clock.install(time=0)
     page.clock.pause_at(1000)

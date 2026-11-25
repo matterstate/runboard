@@ -367,8 +367,8 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
                     y2={196.0 - fraction * 180.0}
                     stroke="#dce2eb"
                 />
-                <text x="52" y={200.0 - fraction * 180.0} text-anchor="end">
-                    {chart_tick(y)}
+                <text data-y-tick x="52" y={200.0 - fraction * 180.0} text-anchor="end">
+                    {chart_y_tick(y, low_y, high_y)}
                 </text>
                 <text
                     data-x-tick=fraction
@@ -385,8 +385,10 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
     html! { output,
         <figure data-key=key>
             <figcaption>
-                {title}" "<span class="dim">"· "{chart_tick(low_y)}" to "{chart_tick(high_y)}</span>
-                <span class="dim" data-chart-state></span>
+                {title}" "
+                <span class="dim">
+                    "· "{chart_y_tick(low_y, low_y, high_y)}" to "{chart_y_tick(high_y, low_y, high_y)}
+                </span> <span class="dim" data-chart-state></span>
             </figcaption>
             <div class="legend">{legend}</div>
             <svg
@@ -458,6 +460,20 @@ fn chart_tick(value: f64) -> String {
     format!("{value:.5e}")
 }
 
+fn chart_y_tick(value: f64, low: f64, high: f64) -> String {
+    if value == 0.0 {
+        return "0".into();
+    }
+    let magnitude = low.abs().max(high.abs());
+    let step = high / 8.0 - low / 8.0;
+    let digits = ((magnitude.log10() - step.log10()).ceil() + 1.0).clamp(3.0, 12.0) as usize;
+    let scientific = format!("{value:.precision$e}", precision = digits - 1);
+    if (0.001..10000.0).contains(&value.abs()) {
+        return scientific.parse::<f64>().expect("finite chart tick").to_string();
+    }
+    scientific
+}
+
 fn chart_domain(low: f64, high: f64) -> (f64, f64) {
     if low != high {
         return (low, high);
@@ -484,14 +500,22 @@ const chart_observer = new ResizeObserver(entries => {
     entries.forEach(({target, contentRect}) => {
         const width = contentRect.width;
         if (width <= 84) return;
-        const plot_width = width - 84;
         target.setAttribute("viewBox", "0 0 " + width + " 252");
+        const labels = [...target.querySelectorAll("[data-y-tick]")];
+        // Hinted glyphs can extend beyond their text advance widths.
+        const left = Math.min(width - 40, Math.max(60, ...labels.map(label => label.getBBox().width + 12)));
+        const plot_width = width - left - 24;
+        target.querySelector("svg.chart").setAttribute("x", left);
         target.querySelector("svg.chart").setAttribute("width", plot_width);
-        target.querySelectorAll("[data-grid]").forEach(line => { line.setAttribute("x2", width - 24); });
-        target.querySelectorAll("[data-x-tick]").forEach(tick => {
-            tick.setAttribute("x", 60 + Number(tick.dataset.xTick) * plot_width);
+        labels.forEach(label => { label.setAttribute("x", left - 8); });
+        target.querySelectorAll("[data-grid]").forEach(line => {
+            line.setAttribute("x1", left);
+            line.setAttribute("x2", width - 24);
         });
-        target.querySelector("[data-axis-label]").setAttribute("x", 60 + plot_width / 2);
+        target.querySelectorAll("[data-x-tick]").forEach(tick => {
+            tick.setAttribute("x", left + Number(tick.dataset.xTick) * plot_width);
+        });
+        target.querySelector("[data-axis-label]").setAttribute("x", left + plot_width / 2);
     });
 });
 
@@ -962,6 +986,11 @@ mod tests {
             assert!(value <= high);
         }
         assert_ne!(chart_tick(1_000_001.0), chart_tick(1_000_002.0));
+        assert_eq!(chart_y_tick(0.402583066712, 0.4, 1.4), "0.403");
+        assert_ne!(
+            chart_y_tick(1.00000001, 1.0, 1.0000001),
+            chart_y_tick(1.00000002, 1.0, 1.0000001)
+        );
     }
 
     #[test]
