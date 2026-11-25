@@ -146,10 +146,24 @@ tokens divided by total training time. Missing samples are neither filled nor
 counted as zero. Charts keep their observations; table reductions do not alter
 the plots.
 
-Under **Smoothing, range and seed groups**, choose trailing mean or **EMA** and
-a span from 1 to 100. EMA uses `alpha = 2 / (span + 1)`, seeded from the first
-reported observation. Span 1 shows raw values. Smoothing precedes visible-range
-filtering and does not change table summaries or saved training data.
+Loss charts default to **tokens seen** when every selected run has token
+history, with raw loss faded underneath an **EMA** overlay (span 20). Other
+metrics default to steps and raw values. Under **Smoothing, range and seed
+groups**, choose Auto, Raw, trailing mean or EMA and a span from 1 to 100
+reported observations. EMA uses `alpha = 2 / (span + 1)`, seeded from the first
+observation; its span is not token-weighted. Span 1 shows raw values. Smoothing
+precedes visible-range filtering and changes neither table summaries nor saved
+training data.
+
+The **tokens** axis uses cumulative `train/tokens_seen` when reported; otherwise
+it sums `train/real_tokens` reporting windows along the retained checkpoint
+branch. Window sums require the complete log within the 16 MiB/100,000-record
+reader bounds. Unreported progress is not inferred, and missing counter
+observations are not interpolated. Use a cumulative counter for runs whose
+history is incomplete. The **flops** axis requires cumulative
+`train/flops_total`; FLOPs are not estimated from steps, token counts or
+timings. Budget counters must be nonnegative and nondecreasing along the
+retained branch. Missing data is identified rather than plotted as zero.
 
 Charts show axis ticks and inspectable, downsampled observations. Hover or tap
 for values, or focus a chart and use the arrow keys, Home and End. Use the zoom
@@ -273,10 +287,10 @@ markers and heartbeat age, rather than checking local PIDs.
 
 ## Compare and share
 
-Choose a metric, step/elapsed/wall-time axis, smoothing window and visible
-range. Elapsed and wall-time axes require `seconds` and Unix-epoch `time` fields
-in the log. Scroll to zoom a chart, drag to pan, or use Reset zoom. Colours stay
-tied to run IDs.
+Choose a metric, tokens/FLOPs/step/elapsed/wall-time axis, smoothing window and
+visible range. Elapsed and wall-time axes require `seconds` and Unix-epoch
+`time` fields in the log. Scroll to zoom a chart, drag to pan, or use Reset
+zoom. Colours stay tied to run IDs.
 
 Seed groups use matching `group`, parameters, revision and dataset, with
 distinct `seed` values. Aggregation uses exactly shared x values and shows the

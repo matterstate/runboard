@@ -45,7 +45,9 @@ def interactions(page: Page, address: str, log: Path) -> None:
     selected = page.evaluate("getSelection().toString()")
     assert selected == "demo/example", (selected, page.locator("h1").inner_text())
     with log.open("a") as output:
-        output.write('{"step":5,"accuracy":0.5,"loss":0.5}\n')
+        output.write(
+            '{"step":5,"accuracy":0.5,"loss":0.5,"train/real_tokens":500,"train/flops_total":5000000000000}\n'
+        )
     update(page)
     expect(page.locator("#live-apply")).to_be_visible()
     page.wait_for_timeout(600)
@@ -101,7 +103,9 @@ def interactions(page: Page, address: str, log: Path) -> None:
     chart = figure.locator("svg.chart")
     chart.focus()
     chart.press("End")
-    expect(figure.locator("output")).to_contain_text("demo/example: 0.5 at step 5")
+    expect(figure.locator("output")).to_contain_text(
+        "demo/example (raw): 0.5 at tokens seen 1,500"
+    )
     figure.get_by_role("button", name="Zoom in", exact=True).click()
     assert chart.get_attribute("data-zoomed") == "1"
     page.mouse.move(0, 0)
@@ -192,7 +196,9 @@ def interactions(page: Page, address: str, log: Path) -> None:
     page.mouse.move(0, 0)
     page.evaluate("document.activeElement.blur()")
     with log.open("a") as output:
-        output.write('{"step":6,"loss":0.25,"accuracy":0.6}\n')
+        output.write(
+            '{"step":6,"loss":0.25,"accuracy":0.6,"train/real_tokens":600,"train/flops_total":6000000000000}\n'
+        )
     update(page)
     expect(cell).to_contain_text("0.25")
     after = [line.split(":")[0] for line in cell.inner_text().splitlines()]
@@ -262,7 +268,35 @@ def recovery(page: Page, address: str) -> None:
             page.locator("#training-performance tr").nth(1).locator("td").last
         ).to_have_text(expected)
 
+    budget_url = address + "/compare?run=demo/example&run=demo/run-50&metric=loss"
+    page.goto(budget_url)
+    titles = [
+        text.split(" ·", 1)[0]
+        for text in page.locator("figcaption").all_text_contents()
+    ]
+    loss = page.locator("figure").nth(titles.index("loss"))
+    expect(loss.locator("svg.chart")).to_have_attribute("data-axis", "tokens seen")
+    raw = loss.locator('polyline[data-label="demo/example (raw)"]')
+    ema = loss.locator('polyline[data-label="demo/example (EMA)"]')
+    raw_samples = json.loads(raw.get_attribute("data-samples"))
+    ema_samples = json.loads(ema.get_attribute("data-samples"))
+    assert raw_samples[0] == [100, 4]
+    assert raw_samples[-1] == [2100, 0.25]
+    assert ema_samples[-1][0] == 2100
+    assert 0.25 < ema_samples[-1][1] < 4
+    assert raw.get_attribute("stroke") == ema.get_attribute("stroke")
+    assert float(raw.get_attribute("stroke-opacity")) < float(
+        ema.get_attribute("stroke-opacity")
+    )
+    page.goto(budget_url + "&axis=flops")
+    expect(loss.locator("svg.chart")).to_have_attribute("data-axis", "FLOPs")
+    assert json.loads(raw.get_attribute("data-samples"))[-1] == [6e12, 0.25]
+    expect(
+        page.get_by_text("No loss observations paired with recorded FLOPs")
+    ).to_be_visible()
+
     page.locator("#chart-filters input[name=metric]").fill("loss")
+    page.locator("select[name=axis]").select_option("step")
     page.locator("#chart-options summary").click()
     page.locator("select[name=smoothing]").select_option("ema")
     page.locator("input[name=smooth]").fill("3")
@@ -275,7 +309,7 @@ def recovery(page: Page, address: str) -> None:
     samples = json.loads(
         page.locator("figure")
         .nth(titles.index("loss"))
-        .locator('polyline[data-label="demo/example"]')
+        .locator('polyline[data-label="demo/example (EMA)"]')
         .get_attribute("data-samples")
     )
     assert samples[0] == [1, 4]
@@ -373,6 +407,8 @@ def main() -> None:
                         "train/step_seconds_mean": 0.025,
                         "train/step_seconds_max": 0.04,
                         "train/tokens_per_second": 1000 * step,
+                        "train/real_tokens": 100 * step,
+                        "train/flops_total": 1000000000000 * step,
                         **{f"profile/block_{index:02}": index for index in range(40)},
                         **{
                             f"device/temperature_{index:02}": index
@@ -387,7 +423,7 @@ def main() -> None:
         for index in range(51):
             name = f"run-{index:02}"
             path = reports / f"{name}_train.log"
-            path.write_text('{"step":1,"loss":1}\n')
+            path.write_text('{"step":1,"loss":1,"train/tokens_seen":500}\n')
             modified = time.time() - 120 + index
             os.utime(path, (modified, modified))
             (reports / f"{name}_TRAINED").write_text("train exit 0")
@@ -460,7 +496,9 @@ def main() -> None:
                             "title", "Connected", timeout=10000
                         )
                         with log.open("a") as output:
-                            output.write('{"step":7,"loss":0.125}\n')
+                            output.write(
+                                '{"step":7,"loss":0.125,"train/real_tokens":700}\n'
+                            )
                         expect(live.locator("dl.metrics")).to_contain_text(
                             "0.125", timeout=10000
                         )
@@ -470,7 +508,7 @@ def main() -> None:
                         touch.goto(address + "/run?run=demo/example&metric=loss")
                         touch.locator("svg.chart").last.tap()
                         expect(touch.locator("figure output").last).to_contain_text(
-                            "demo/example:"
+                            "demo/example (raw):"
                         )
                     finally:
                         browser.close()

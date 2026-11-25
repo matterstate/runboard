@@ -11,6 +11,7 @@ pub const RECORDS_MAX: usize = 100_000;
 const LATEST_METRICS_MAX: usize = 128;
 pub const DIRECTORY_ENTRIES_MAX: usize = 200_000;
 pub const LOG_BYTES_MAX: u64 = 16 << 20;
+pub const TOKENS_AXIS: &str = "runboard.tokens_seen";
 const METADATA_BYTES_MAX: u64 = 1 << 20;
 pub const TIERS: [&str; 3] = ["original", "hard", "easy"];
 /// Suffixes a stage's scored variants carry: order-averaged, with fitted temperatures, and both.
@@ -374,7 +375,55 @@ pub fn training_records(stage: &Stage) -> Vec<Record> {
     let Some(log) = stage.log_path.as_deref().and_then(|path| tail(path, LOG_BYTES_MAX)) else {
         return Vec::new();
     };
-    records_from_log(&log)
+    let mut records = records_from_log(&log);
+    let complete = stage
+        .log_path
+        .as_ref()
+        .and_then(|path| fs::metadata(path).ok())
+        .is_some_and(|metadata| metadata.len() <= LOG_BYTES_MAX)
+        && records.len() < RECORDS_MAX;
+    annotate_tokens(
+        &mut records,
+        if complete {
+            HistoryExtent::Complete
+        } else {
+            HistoryExtent::Tail
+        },
+    );
+    records
+}
+
+enum HistoryExtent {
+    Complete,
+    Tail,
+}
+
+fn annotate_tokens(records: &mut [Record], extent: HistoryExtent) {
+    for record in records.iter_mut() {
+        record.0.retain(|(name, _)| name != TOKENS_AXIS);
+    }
+    let cumulative = records.iter().any(|record| record.get("train/tokens_seen").is_some());
+    if !cumulative && matches!(extent, HistoryExtent::Tail) {
+        return;
+    }
+    let mut total = 0.0;
+    for record in records {
+        let key = if cumulative {
+            "train/tokens_seen"
+        } else {
+            "train/real_tokens"
+        };
+        let Some(value) = record.get(key) else { continue };
+        if !value.is_finite() || value < 0.0 {
+            break;
+        }
+        let next = if cumulative { value } else { total + value };
+        if !next.is_finite() || next < total {
+            break;
+        }
+        total = next;
+        record.0.push((TOKENS_AXIS.into(), total));
+    }
 }
 
 fn records_from_log(log: &str) -> Vec<Record> {
@@ -430,7 +479,7 @@ pub fn latest_values(records: &[Record]) -> Option<Record> {
     let fields_max = latest.0.len() + LATEST_METRICS_MAX;
     'records: for record in records.iter().rev() {
         for (name, value) in &record.0 {
-            if matches!(name.as_str(), "step" | "time" | "seconds") {
+            if matches!(name.as_str(), "step" | "time" | "seconds" | TOKENS_AXIS) {
                 continue;
             }
             if latest.get(name).is_none() {
@@ -600,6 +649,48 @@ pub fn jobs(path: &Path, count: usize) -> Vec<Job> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_axes_follow_checkpoint_branches_without_inventing_missing_history() {
+        let mut records = records_from_log(concat!(
+            "{\"step\":1,\"train/real_tokens\":100}\n",
+            "{\"step\":2,\"train/real_tokens\":200}\n",
+            "{\"step\":3,\"train/real_tokens\":300}\n",
+            "{\"runboard\":{\"event\":\"resume\"},\"step\":2}\n",
+            "{\"step\":4,\"train/real_tokens\":50}\n",
+            "{\"step\":5,\"loss\":1}\n"
+        ));
+        let mut partial = records.clone();
+        annotate_tokens(&mut partial, HistoryExtent::Tail);
+        assert!(partial.iter().all(|record| record.get(TOKENS_AXIS).is_none()));
+        annotate_tokens(&mut records, HistoryExtent::Complete);
+        assert_eq!(
+            records
+                .iter()
+                .filter_map(|record| record.get(TOKENS_AXIS))
+                .collect::<Vec<_>>(),
+            [100.0, 300.0, 350.0]
+        );
+        assert!(records.last().unwrap().get(TOKENS_AXIS).is_none());
+        let mut counters = records_from_log("{\"step\":20,\"train/tokens_seen\":1000,\"train/real_tokens\":100}\n{\"step\":40,\"train/tokens_seen\":3000,\"train/real_tokens\":200}\n");
+        annotate_tokens(&mut counters, HistoryExtent::Tail);
+        assert_eq!(
+            counters
+                .iter()
+                .filter_map(|record| record.get(TOKENS_AXIS))
+                .collect::<Vec<_>>(),
+            [1000.0, 3000.0]
+        );
+        let mut invalid = records_from_log("{\"step\":1,\"train/real_tokens\":100}\n{\"step\":2,\"train/real_tokens\":-1}\n{\"step\":3,\"train/real_tokens\":200}\n");
+        annotate_tokens(&mut invalid, HistoryExtent::Complete);
+        assert_eq!(
+            invalid
+                .iter()
+                .filter_map(|record| record.get(TOKENS_AXIS))
+                .collect::<Vec<_>>(),
+            [100.0]
+        );
+    }
 
     fn fixture() -> PathBuf {
         let root = std::env::temp_dir().join(format!(

@@ -554,8 +554,13 @@ pub fn route(settings: &Settings, target: &str) -> Response {
             return Response::error(400, &format!("{key} must be a finite number"));
         }
     }
-    if !query.get("axis").is_empty() && !matches!(query.get("axis"), "step" | "seconds" | "time") {
-        return Response::error(400, "Axis must be step, seconds or time");
+    if !query.get("axis").is_empty()
+        && !matches!(
+            query.get("axis"),
+            "auto" | "tokens" | "flops" | "step" | "seconds" | "time"
+        )
+    {
+        return Response::error(400, "Axis must be auto, tokens, flops, step, seconds or time");
     }
     if !query.get("smooth").is_empty()
         && !query
@@ -568,8 +573,8 @@ pub fn route(settings: &Settings, target: &str) -> Response {
     if MetricAggregation::parse(query.get("aggregate")).is_none() {
         return Response::error(400, "aggregate must be latest, mean, min or max");
     }
-    if Smoothing::parse(query.get("smoothing")).is_none() {
-        return Response::error(400, "smoothing must be mean or ema");
+    if Smoothing::parse(query.get("smoothing"), data::MetricKind::Training).is_none() {
+        return Response::error(400, "smoothing must be auto, raw, mean or ema");
     }
     let response = match path {
         "/" => Response::html(index(settings, &query)),
@@ -1039,7 +1044,11 @@ fn controls(
                 <label>
                     "Axis "
                     <select name="axis">
-                        {|output| options(output, &["step", "seconds", "time"], axis(query))}
+                        {|output| options(
+                            output,
+                            &["auto", "tokens", "flops", "step", "seconds", "time"],
+                            if query.get("axis").is_empty() { "auto" } else { query.get("axis") },
+                        )}
                     </select>
                 </label>
                 {|output| {
@@ -1077,7 +1086,21 @@ fn controls(
                 <fieldset>
                     <label>
                         "Smoothing method " <select name="smoothing">
-                            <option value="mean" selected=(query.get("smoothing") != "ema")>
+                            <option
+                                value="auto"
+                                selected=((query.get("smoothing").is_empty()
+                                    && query.get("smooth").is_empty()) || query.get("smoothing") == "auto")
+                            >
+                                "Auto (loss EMA)"
+                            </option>
+                            <option value="raw" selected=(query.get("smoothing") == "raw")>
+                                "Raw"
+                            </option>
+                            <option
+                                value="mean"
+                                selected=(query.get("smoothing") == "mean"
+                                    || (query.get("smoothing").is_empty() && !query.get("smooth").is_empty()))
+                            >
                                 "Trailing mean"
                             </option>
                             <option value="ema" selected=(query.get("smoothing") == "ema")>
@@ -1092,7 +1115,7 @@ fn controls(
                             name="smooth"
                             min="1"
                             max="100"
-                            value={query.get("smooth").parse::<u32>().unwrap_or(1).clamp(1, 100)}
+                            value={query.get("smooth").parse::<u32>().unwrap_or(20).clamp(1, 100)}
                         />
                     </label>
                     <label>
@@ -1105,7 +1128,7 @@ fn controls(
                     <label>"To "<input type="number" step="any" name="end" value=query.get("end") /></label>
                 </fieldset>
                 <p class="dim">
-                    "Span 1 shows raw values. Trailing mean uses the last N observations. EMA uses alpha = 2 / (span + 1), seeded from the first observation. Smoothing affects charts, not table summaries. Axes use logged fields; sparse observations are not filled."
+                    "Auto shows loss against tokens seen when all runs have token history, with raw loss under an EMA overlay; other metrics use steps and raw values. EMA uses alpha = 2 / (span + 1), seeded from the first observation; span 1 is raw. Tokens sums reported train/real_tokens windows only with complete history, or uses cumulative train/tokens_seen. FLOPs requires cumulative train/flops_total; it is not estimated. Table summaries are unchanged."
                 </p>
             </details>
             <p class="dim">
@@ -1138,29 +1161,121 @@ fn training_time(entry: &Entry<'_>, last: Option<&Record>) -> String {
     }
 }
 
-fn axis(query: &Query) -> &'static str {
-    match query.get("axis") {
-        "seconds" => "seconds",
-        "time" => "time",
-        _ => "step",
+#[derive(Clone, Copy)]
+enum Axis {
+    Step,
+    Seconds,
+    Time,
+    Tokens,
+    FloatingPointOperations,
+}
+
+impl Axis {
+    fn field(self) -> &'static str {
+        match self {
+            Self::Step => "step",
+            Self::Seconds => "seconds",
+            Self::Time => "time",
+            Self::Tokens => data::TOKENS_AXIS,
+            Self::FloatingPointOperations => "train/flops_total",
+        }
+    }
+    fn is_budget(self) -> bool {
+        matches!(self, Self::Tokens | Self::FloatingPointOperations)
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tokens => "tokens seen",
+            Self::FloatingPointOperations => "FLOPs",
+            _ => self.field(),
+        }
     }
 }
 
-fn curve(records: &[Record], metric: &str, query: &Query) -> Vec<(f64, f64)> {
-    let axis = axis(query);
-    let window = query.get("smooth").parse::<usize>().unwrap_or(1).clamp(1, 100);
+fn axis(query: &Query, metric: &str, logs: &[Vec<Record>]) -> Axis {
+    match query.get("axis") {
+        "seconds" => Axis::Seconds,
+        "time" => Axis::Time,
+        "step" => Axis::Step,
+        "tokens" => Axis::Tokens,
+        "flops" => Axis::FloatingPointOperations,
+        _ => {
+            if data::metric_order(metric).0 != data::MetricKind::Loss {
+                return Axis::Step;
+            }
+            if logs
+                .iter()
+                .all(|log| log.iter().any(|record| record.get(data::TOKENS_AXIS).is_some()))
+            {
+                return Axis::Tokens;
+            }
+            Axis::Step
+        }
+    }
+}
+
+fn smoothing(query: &Query, metric: &str) -> Smoothing {
+    let value = if query.get("smoothing").is_empty() && !query.get("smooth").is_empty() {
+        "mean"
+    } else {
+        query.get("smoothing")
+    };
+    Smoothing::parse(value, data::metric_order(metric).0).expect("validated smoothing method")
+}
+
+fn training_series(label: String, log: &[Record], metric: &str, query: &Query, axis: Axis) -> Series {
+    let method = smoothing(query, metric);
+    let raw = if method == Smoothing::ExponentialMovingAverage && query.get("smooth").parse::<u32>().unwrap_or(20) > 1 {
+        Some(curve(log, metric, query, axis, Smoothing::Raw))
+    } else {
+        None
+    };
+    Series {
+        label,
+        points: curve(log, metric, query, axis, method),
+        raw,
+    }
+}
+
+fn training_chart(output: &mut Output, metric: &str, axis: Axis, series: &[Series]) -> RenderResult {
+    if axis.is_budget() {
+        for line in series {
+            if line.points.is_empty() {
+                html! { output,
+                    <p class="dim">
+                        "No "{metric}" observations paired with recorded "{axis.label()}" for "{line.label}
+                        ". Budget counters are not estimated or interpolated."
+                    </p>
+                }?;
+            }
+        }
+    }
+    html::chart(output, metric, axis.label(), series)
+}
+
+fn curve(records: &[Record], metric: &str, query: &Query, axis: Axis, smoothing: Smoothing) -> Vec<(f64, f64)> {
+    let window = query.get("smooth").parse::<usize>().unwrap_or(20).clamp(1, 100);
     let start = query.get("start").parse::<f64>().unwrap_or(f64::NEG_INFINITY);
     let end = query.get("end").parse::<f64>().unwrap_or(f64::INFINITY);
-    let smoothing = Smoothing::parse(query.get("smoothing")).expect("validated smoothing method");
     let alpha = 2.0 / (window as f64 + 1.0);
     let mut ema: Option<f64> = None;
     let mut history = std::collections::VecDeque::new();
     let mut points = Vec::new();
+    let mut previous_x = None;
     for record in records {
-        let (Some(x), Some(y)) = (record.get(axis), record.get(metric)) else {
-            continue;
-        };
+        let x = record.get(axis.field());
+        if let Some(value) = x.filter(|_| axis.is_budget()) {
+            if !value.is_finite() {
+                break;
+            }
+            if value < previous_x.unwrap_or(0.0) {
+                break;
+            }
+            previous_x = Some(value);
+        }
+        let Some(y) = record.get(metric) else { continue };
         let y = match smoothing {
+            Smoothing::Raw => y,
             Smoothing::Mean => {
                 history.push_back(y);
                 if history.len() > window {
@@ -1175,6 +1290,7 @@ fn curve(records: &[Record], metric: &str, query: &Query) -> Vec<(f64, f64)> {
                 value
             }
         };
+        let Some(x) = x else { continue };
         if x >= start && x <= end && y.is_finite() {
             points.push((x, y));
         }
@@ -1182,15 +1298,23 @@ fn curve(records: &[Record], metric: &str, query: &Query) -> Vec<(f64, f64)> {
     points
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Smoothing {
+    Raw,
     Mean,
     ExponentialMovingAverage,
 }
 
 impl Smoothing {
-    fn parse(value: &str) -> Option<Self> {
+    fn parse(value: &str, kind: data::MetricKind) -> Option<Self> {
         match value {
-            "" | "mean" => Some(Self::Mean),
+            "" | "auto" => Some(if kind == data::MetricKind::Loss {
+                Self::ExponentialMovingAverage
+            } else {
+                Self::Raw
+            }),
+            "raw" => Some(Self::Raw),
+            "mean" => Some(Self::Mean),
             "ema" => Some(Self::ExponentialMovingAverage),
             _ => None,
         }
@@ -1258,7 +1382,7 @@ fn metric_page(logs: &[Vec<Record>], selected: &str, after: &str) -> MetricPage 
                 if !matches_filter {
                     continue;
                 }
-                if !matches!(key.as_str(), "step" | "time" | "seconds") {
+                if !matches!(key.as_str(), "step" | "time" | "seconds" | data::TOKENS_AXIS) {
                     if !after.is_empty() && data::metric_order(key) <= data::metric_order(after) {
                         continue;
                     }
@@ -1716,17 +1840,15 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> RenderRes
                 }?;
             }
             for metric in page.names {
+                let axis = axis(query, &metric, &logs);
                 let series: Vec<Series> = selected
                     .iter()
                     .zip(&logs)
-                    .map(|(entry, log)| Series {
-                        label: entry.id(),
-                        points: curve(log, &metric, query),
-                    })
+                    .map(|(entry, log)| training_series(entry.id(), log, &metric, query, axis))
                     .collect();
-                html::chart(output, &metric, axis(query), &series)?;
+                training_chart(output, &metric, axis, &series)?;
                 if query.get("group") == "1" {
-                    seed_groups(output, selected, &series, axis(query))?;
+                    seed_groups(output, selected, &series, axis.label())?;
                 }
             }
             if !offline {
@@ -1871,16 +1993,19 @@ fn seed_groups(output: &mut Output, selected: &[Entry<'_>], series: &[Series], a
                         .push(Series {
                             label: format!("{group} mean"),
                             points: average,
+                            raw: None,
                         });
                     curves
                         .push(Series {
                             label: format!("{group} + sample SD"),
                             points: upper,
+                            raw: None,
                         });
                     curves
                         .push(Series {
                             label: format!("{group} − sample SD"),
                             points: lower,
+                            raw: None,
                         });
                     html! { output,
                         <tr>
@@ -2011,14 +2136,12 @@ fn run_page(settings: &Settings, entry: &Entry<'_>, query: &Query) -> RenderResu
                 }?;
             }
             for metric in names {
-                html::chart(
+                let axis = axis(query, metric, std::slice::from_ref(&log));
+                training_chart(
                     output,
                     metric,
-                    axis(query),
-                    &[Series {
-                        label: entry.id(),
-                        points: curve(&log, metric, query),
-                    }],
+                    axis,
+                    &[training_series(entry.id(), &log, metric, query, axis)],
                 )?;
             }
             if !log.is_empty() {
@@ -2105,7 +2228,7 @@ fn csv(selected: &[Entry<'_>]) -> Result<String, (u16, String)> {
         for record in records(entry) {
             let axis = |key: &str| record.get(key).map(|value| value.to_string()).unwrap_or_default();
             for (key, value) in &record.0 {
-                if matches!(key.as_str(), "step" | "seconds" | "time") {
+                if matches!(key.as_str(), "step" | "seconds" | "time" | data::TOKENS_AXIS) {
                     continue;
                 }
                 let _ = write!(
@@ -2580,6 +2703,7 @@ fn devices(settings: &Settings, query: &Query) -> RenderResult<String> {
                             &[Series {
                                 label: title.clone(),
                                 points,
+                                raw: None,
                             }],
                         )?;
                     }
@@ -3070,7 +3194,7 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
             r#"{"group":"trial","seed":2,"revision":"abc","dataset":"demo","parameters":{"lr":0.01}}"#,
         )
         .unwrap();
-        let page = fixture.text("/compare?run=a/same&run=a/next&metric=loss&group=1");
+        let page = fixture.text("/compare?run=a/same&run=a/next&metric=loss&group=1&smoothing=raw");
         assert!(page.contains("Sample standard deviation"));
         assert!(page.contains("a/trial"));
         assert!(page.contains("<td>2</td><td>2</td><td>2</td>"));
@@ -3099,15 +3223,52 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
             ]),
         ];
         let query = Query::parse("axis=seconds&smooth=2&start=15&end=25").unwrap();
-        assert_eq!(curve(&records, "loss", &query), [(20.0, 3.0)]);
+        assert_eq!(
+            curve(&records, "loss", &query, Axis::Seconds, smoothing(&query, "loss")),
+            [(20.0, 3.0)]
+        );
         let query = Query::parse("axis=time").unwrap();
-        assert!(curve(&records, "loss", &query).is_empty());
+        assert!(curve(&records, "loss", &query, Axis::Time, smoothing(&query, "loss")).is_empty());
         let query = Query::parse("smoothing=ema&smooth=3").unwrap();
-        assert_eq!(curve(&records, "loss", &query), [(1.0, 4.0), (2.0, 3.0)]);
+        assert_eq!(
+            curve(&records, "loss", &query, Axis::Step, smoothing(&query, "loss")),
+            [(1.0, 4.0), (2.0, 3.0)]
+        );
         let query = Query::parse("smoothing=ema&smooth=3&start=2").unwrap();
-        assert_eq!(curve(&records, "loss", &query), [(2.0, 3.0)]);
+        assert_eq!(
+            curve(&records, "loss", &query, Axis::Step, smoothing(&query, "loss")),
+            [(2.0, 3.0)]
+        );
         let query = Query::parse("smoothing=ema&smooth=1").unwrap();
-        assert_eq!(curve(&records, "loss", &query), [(1.0, 4.0), (2.0, 2.0)]);
+        assert_eq!(
+            curve(&records, "loss", &query, Axis::Step, smoothing(&query, "loss")),
+            [(1.0, 4.0), (2.0, 2.0)]
+        );
+        let mut budgets = records;
+        for (record, (tokens, flops)) in budgets.iter_mut().zip([(1000.0, 1e12), (3000.0, 3e12)]) {
+            record
+                .0
+                .extend([(data::TOKENS_AXIS.into(), tokens), ("train/flops_total".into(), flops)]);
+        }
+        let query = Query::parse("smoothing=ema&smooth=3").unwrap();
+        let series = training_series("run".into(), &budgets, "loss", &query, Axis::Tokens);
+        assert_eq!(series.raw.unwrap(), [(1000.0, 4.0), (3000.0, 2.0)]);
+        assert_eq!(series.points, [(1000.0, 4.0), (3000.0, 3.0)]);
+        let series = training_series("run".into(), &budgets, "loss", &query, Axis::FloatingPointOperations);
+        assert_eq!(series.points, [(1e12, 4.0), (3e12, 3.0)]);
+        budgets[0].0.retain(|(key, _)| key != data::TOKENS_AXIS);
+        let series = training_series("run".into(), &budgets, "loss", &query, Axis::Tokens);
+        assert_eq!(series.points, [(3000.0, 3.0)]);
+        budgets[1]
+            .0
+            .iter_mut()
+            .find(|(key, _)| key == "train/flops_total")
+            .unwrap()
+            .1 = -1.0;
+        assert_eq!(
+            curve(&budgets, "loss", &query, Axis::FloatingPointOperations, Smoothing::Raw),
+            [(1e12, 4.0)]
+        );
     }
 
     #[test]

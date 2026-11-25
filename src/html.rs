@@ -7,6 +7,14 @@ pub const PAGE_BYTES_MAX: u32 = 32 << 20;
 pub struct Series {
     pub label: String,
     pub points: Vec<(f64, f64)>,
+    pub raw: Option<Vec<(f64, f64)>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TraceStyle {
+    Main,
+    Raw,
+    ExponentialMovingAverage,
 }
 
 pub fn encode(value: &str) -> String {
@@ -212,10 +220,21 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
     let mut high_x = f64::NEG_INFINITY;
     let mut low_y = f64::INFINITY;
     let mut high_y = f64::NEG_INFINITY;
-    let mut reduced = Vec::new();
+    let mut traces = Vec::new();
     for line in series.iter().take(32) {
+        if let Some(raw) = &line.raw {
+            traces.push((line.label.as_str(), raw.as_slice(), TraceStyle::Raw));
+        }
+        let style = if line.raw.is_some() {
+            TraceStyle::ExponentialMovingAverage
+        } else {
+            TraceStyle::Main
+        };
+        traces.push((line.label.as_str(), line.points.as_slice(), style));
+    }
+    let mut reduced = Vec::new();
+    for (_, line, _) in &traces {
         let points: Vec<(f64, f64)> = line
-            .points
             .iter()
             .copied()
             .filter(|(x, y)| x.is_finite() && y.is_finite())
@@ -260,7 +279,9 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
         reduced.push(shown);
     }
     if !low_x.is_finite() {
-        return html! { output, <p>"No points for "{title}" on this axis."</p> };
+        return html! { output,
+            <p>"No points for "{title}" on the "{axis}" axis. Missing budget counters are not estimated."</p>
+        };
     }
     (low_x, high_x) = chart_domain(low_x, high_x);
     (low_y, high_y) = chart_domain(low_y, high_y);
@@ -268,7 +289,8 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
     let span_y = (high_y / 2.0 - low_y / 2.0).max(f64::MIN_POSITIVE);
     let mut lines = Vec::new();
     for (index, points) in reduced.iter().enumerate() {
-        let hash = series[index].label.bytes().fold(2166136261u32, |hash, byte| {
+        let (label, _, style) = traces[index];
+        let hash = label.bytes().fold(2166136261u32, |hash, byte| {
             (hash ^ u32::from(byte)).wrapping_mul(16777619)
         });
         // Only this bounded numeric hash supplies the legend's CSS colour.
@@ -281,7 +303,7 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
         }
         let last = points.last().map(|point| number(point.1)).unwrap_or_else(|| "–".into());
         let samples = serde_json::to_string(points).expect("finite chart points serialize");
-        lines.push((colour, path, &series[index].label, last, samples));
+        lines.push((colour, path, label, last, samples, style));
     }
     let key = encode(&format!(
         "{title}|{}",
@@ -292,23 +314,35 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
             .join("|")
     ));
     let legend = component(|output| {
-        output.each(&lines, |output, (colour, _, label, last, _)| {
+        output.each(&lines, |output, (colour, _, label, last, _, style)| {
+            if *style == TraceStyle::Raw {
+                return Ok(());
+            }
             output.trusted(TrustedHtml("<span"))?;
             output.attribute("style", &format!("color:{colour}"))?;
             output.trusted(TrustedHtml(">"))?;
             output.text(label)?;
+            if *style == TraceStyle::ExponentialMovingAverage {
+                output.text(" (EMA)")?;
+            }
             output.text(": ")?;
             output.text(last)?;
             output.trusted(TrustedHtml("</span>"))
         })
     });
     let paths = component(|output| {
-        output.each(&lines, |output, (colour, path, label, _, samples)| {
+        output.each(&lines, |output, (colour, path, label, _, samples, style)| {
+            let label = match style {
+                TraceStyle::Raw => format!("{label} (raw)"),
+                TraceStyle::ExponentialMovingAverage => format!("{label} (EMA)"),
+                TraceStyle::Main => (*label).to_string(),
+            };
             html! { output,
                 <polyline
                     fill="none"
                     stroke=colour
-                    stroke-width="2"
+                    stroke-width={if *style == TraceStyle::Raw { "1" } else { "2" }}
+                    stroke-opacity={if *style == TraceStyle::Raw { "0.22" } else { "1" }}
                     stroke-linecap="round"
                     stroke-linejoin="round"
                     vector-effect="non-scaling-stroke"
@@ -900,12 +934,17 @@ mod tests {
                     &[Series {
                         label: "<run>".into(),
                         points: vec![(-1e308, -1e308), (1e308, 1e308), (2.0, f64::NAN)],
+                        raw: Some(vec![(-1e308, -1e308), (1e308, 1e308)]),
                     }],
                 )
             },
             true,
         )
         .unwrap();
+        assert_eq!(page.matches("<polyline").count(), 2);
+        assert!(page.contains("stroke-opacity=\"0.22\""));
+        assert!(page.contains("&lt;run&gt; (raw)"));
+        assert!(page.contains("&lt;run&gt; (EMA)"));
         assert!(!page.contains("NaN"));
         assert!(!page.contains("inf"));
         assert!(page.contains("&lt;metric&gt;"));
@@ -940,6 +979,7 @@ mod tests {
                     &[Series {
                         label: "run".into(),
                         points,
+                        raw: None,
                     }],
                 )
             },
