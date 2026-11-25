@@ -147,10 +147,16 @@ counted as zero. Charts keep their observations; table reductions do not alter
 the plots.
 
 Loss charts default to **tokens seen** when every selected run has token
-history, with raw loss faded underneath an **EMA** overlay (span 20). Other
-metrics default to steps and raw values. Under **Smoothing, range and seed
-groups**, choose Auto, Raw, trailing mean or EMA and a span from 1 to 100
-reported observations. EMA uses `alpha = 2 / (span + 1)`, seeded from the first
+history, with raw loss faded underneath a centered **Gaussian** overlay. Its
+bandwidth (standard deviation) defaults to 1% of each run's full retained axis
+range, measured in tokens/FLOPs rather than observation count. Adjust it from
+0.5% to 10%; smaller values follow changes more closely. The bounded 1024-bin
+approximation uses a kernel truncated at four standard deviations. Both sides of
+a point contribute, so new data can revise the curve; its relative bandwidth
+grows with the run's axis range too. Other metrics default to steps and raw
+values. Under **Smoothing, range and seed groups**, choose Auto, Gaussian, Raw,
+trailing mean or EMA. Mean and EMA use a span from 1 to 100 reported
+observations. EMA uses `alpha = 2 / (span + 1)`, seeded from the first
 observation; its span is not token-weighted. Span 1 shows raw values. Smoothing
 precedes visible-range filtering and changes neither table summaries nor saved
 training data.

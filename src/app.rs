@@ -574,7 +574,15 @@ pub fn route(settings: &Settings, target: &str) -> Response {
         return Response::error(400, "aggregate must be latest, mean, min or max");
     }
     if Smoothing::parse(query.get("smoothing"), data::MetricKind::Training).is_none() {
-        return Response::error(400, "smoothing must be auto, raw, mean or ema");
+        return Response::error(400, "smoothing must be auto, raw, mean, ema or gaussian");
+    }
+    if !query.get("bandwidth").is_empty()
+        && !query
+            .get("bandwidth")
+            .parse::<f64>()
+            .is_ok_and(|value| value.is_finite() && (0.5..=10.0).contains(&value))
+    {
+        return Response::error(400, "bandwidth must be between 0.5 and 10 percent");
     }
     let response = match path {
         "/" => Response::html(index(settings, &query)),
@@ -1091,7 +1099,10 @@ fn controls(
                                 selected=((query.get("smoothing").is_empty()
                                     && query.get("smooth").is_empty()) || query.get("smoothing") == "auto")
                             >
-                                "Auto (loss EMA)"
+                                "Auto (loss Gaussian)"
+                            </option>
+                            <option value="gaussian" selected=(query.get("smoothing") == "gaussian")>
+                                "Gaussian"
                             </option>
                             <option value="raw" selected=(query.get("smoothing") == "raw")>
                                 "Raw"
@@ -1109,7 +1120,7 @@ fn controls(
                         </select>
                     </label>
                     <label>
-                        "Smoothing span "
+                        "Mean / EMA span "
                         <input
                             type="number"
                             name="smooth"
@@ -1123,12 +1134,23 @@ fn controls(
                         <input type="checkbox" name="group" value="1" checked=(query.get("group") == "1") />
                     </label>
                     <label>
+                        "Gaussian bandwidth (% of run axis range) "
+                        <input
+                            type="number"
+                            name="bandwidth"
+                            min="0.5"
+                            max="10"
+                            step="0.1"
+                            value={query.get("bandwidth").parse::<f64>().unwrap_or(1.0)}
+                        />
+                    </label>
+                    <label>
                         "From "<input type="number" step="any" name="start" value=query.get("start") />
                     </label>
                     <label>"To "<input type="number" step="any" name="end" value=query.get("end") /></label>
                 </fieldset>
                 <p class="dim">
-                    "Auto shows loss against tokens seen when all runs have token history, with raw loss under an EMA overlay; other metrics use steps and raw values. EMA uses alpha = 2 / (span + 1), seeded from the first observation; span 1 is raw. Tokens sums reported train/real_tokens windows only with complete history, or uses cumulative train/tokens_seen. FLOPs requires cumulative train/flops_total; it is not estimated. Table summaries are unchanged."
+                    "Auto shows loss against tokens seen when all runs have token history, with raw loss under a centered Gaussian overlay; other metrics use steps and raw values. Gaussian bandwidth is its standard deviation in axis distance (default 1% of each run's full retained axis range), not observation count. Both sides contribute; new data can revise the curve, and its relative bandwidth grows with the run's axis range. EMA uses alpha = 2 / (span + 1), seeded from the first observation; span 1 is raw. Tokens sums reported train/real_tokens windows only with complete history, or uses cumulative train/tokens_seen. FLOPs requires cumulative train/flops_total; it is not estimated. Table summaries are unchanged."
                 </p>
             </details>
             <p class="dim">
@@ -1225,11 +1247,12 @@ fn smoothing(query: &Query, metric: &str) -> Smoothing {
 
 fn training_series(label: String, log: &[Record], metric: &str, query: &Query, axis: Axis) -> Series {
     let method = smoothing(query, metric);
-    let raw = if method == Smoothing::ExponentialMovingAverage && query.get("smooth").parse::<u32>().unwrap_or(20) > 1 {
-        Some(curve(log, metric, query, axis, Smoothing::Raw))
-    } else {
-        None
+    let overlay = match method {
+        Smoothing::Gaussian => Some("Gaussian"),
+        Smoothing::ExponentialMovingAverage if query.get("smooth").parse::<u32>().unwrap_or(20) > 1 => Some("EMA"),
+        _ => None,
     };
+    let raw = overlay.map(|name| (name, curve(log, metric, query, axis, Smoothing::Raw)));
     Series {
         label,
         points: curve(log, metric, query, axis, method),
@@ -1251,6 +1274,65 @@ fn training_chart(output: &mut Output, metric: &str, axis: Axis, series: &[Serie
         }
     }
     html::chart(output, metric, axis.label(), series)
+}
+
+// Linear binning bounds the work independently of reporting density. The kernel
+// uses axis distance, is centered, and truncates at four standard deviations.
+fn gaussian_curve(points: &[(f64, f64)], bandwidth: f64) -> Vec<(f64, f64)> {
+    const BINS: usize = 1024;
+    debug_assert!(bandwidth.is_finite() && (0.005..=0.1).contains(&bandwidth));
+    if points.is_empty() {
+        return Vec::new();
+    }
+    let low = points.iter().map(|point| point.0).fold(f64::INFINITY, f64::min);
+    let high = points.iter().map(|point| point.0).fold(f64::NEG_INFINITY, f64::max);
+    let span = high / 2.0 - low / 2.0;
+    let scale = points.iter().map(|point| point.1.abs()).fold(0.0, f64::max);
+    let low_y = points.iter().map(|point| point.1).fold(f64::INFINITY, f64::min);
+    let high_y = points.iter().map(|point| point.1).fold(f64::NEG_INFINITY, f64::max);
+    if span <= 0.0 || scale == 0.0 {
+        return points.to_vec();
+    }
+    let position = |x: f64| ((x / 2.0 - low / 2.0) / span * (BINS - 1) as f64).clamp(0.0, (BINS - 1) as f64);
+    let mut counts = [0.0; BINS];
+    let mut sums = [0.0; BINS];
+    for &(x, y) in points {
+        let offset = position(x);
+        let index = offset.floor() as usize;
+        let fraction = offset - index as f64;
+        for (index, weight) in [(index, 1.0 - fraction), ((index + 1).min(BINS - 1), fraction)] {
+            counts[index] += weight;
+            sums[index] += weight * (y / scale);
+        }
+    }
+    let sigma = bandwidth * (BINS - 1) as f64;
+    let radius = ((4.0 * sigma).ceil() as usize).min(BINS - 1);
+    let kernel: Vec<f64> = (0..=radius)
+        .map(|distance| (-0.5 * (distance as f64 / sigma).powi(2)).exp())
+        .collect();
+    let mut weights = [0.0; BINS];
+    let mut values = [0.0; BINS];
+    for index in 0..BINS {
+        for neighbor in index.saturating_sub(radius)..=(index + radius).min(BINS - 1) {
+            let weight = kernel[index.abs_diff(neighbor)];
+            weights[index] += weight * counts[neighbor];
+            values[index] += weight * sums[neighbor];
+        }
+    }
+    points
+        .iter()
+        .map(|&(x, y)| {
+            let offset = position(x);
+            let index = offset.floor() as usize;
+            let next = (index + 1).min(BINS - 1);
+            let fraction = offset - index as f64;
+            let weight = weights[index] * (1.0 - fraction) + weights[next] * fraction;
+            debug_assert!(weight > 0.0);
+            let value = (values[index] * (1.0 - fraction) + values[next] * fraction) / weight;
+            let smoothed = (value.clamp(-1.0, 1.0) * scale).clamp(low_y, high_y);
+            (x, if smoothed.is_finite() { smoothed } else { y })
+        })
+        .collect()
 }
 
 fn curve(records: &[Record], metric: &str, query: &Query, axis: Axis, smoothing: Smoothing) -> Vec<(f64, f64)> {
@@ -1275,7 +1357,7 @@ fn curve(records: &[Record], metric: &str, query: &Query, axis: Axis, smoothing:
         }
         let Some(y) = record.get(metric) else { continue };
         let y = match smoothing {
-            Smoothing::Raw => y,
+            Smoothing::Raw | Smoothing::Gaussian => y,
             Smoothing::Mean => {
                 history.push_back(y);
                 if history.len() > window {
@@ -1291,15 +1373,21 @@ fn curve(records: &[Record], metric: &str, query: &Query, axis: Axis, smoothing:
             }
         };
         let Some(x) = x else { continue };
-        if x >= start && x <= end && y.is_finite() {
+        if y.is_finite() {
             points.push((x, y));
         }
     }
+    if smoothing == Smoothing::Gaussian {
+        let bandwidth = query.get("bandwidth").parse::<f64>().unwrap_or(1.0) / 100.0;
+        points = gaussian_curve(&points, bandwidth);
+    }
+    points.retain(|(x, _)| *x >= start && *x <= end);
     points
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Smoothing {
+    Gaussian,
     Raw,
     Mean,
     ExponentialMovingAverage,
@@ -1309,10 +1397,11 @@ impl Smoothing {
     fn parse(value: &str, kind: data::MetricKind) -> Option<Self> {
         match value {
             "" | "auto" => Some(if kind == data::MetricKind::Loss {
-                Self::ExponentialMovingAverage
+                Self::Gaussian
             } else {
                 Self::Raw
             }),
+            "gaussian" => Some(Self::Gaussian),
             "raw" => Some(Self::Raw),
             "mean" => Some(Self::Mean),
             "ema" => Some(Self::ExponentialMovingAverage),
@@ -3252,7 +3341,7 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
         }
         let query = Query::parse("smoothing=ema&smooth=3").unwrap();
         let series = training_series("run".into(), &budgets, "loss", &query, Axis::Tokens);
-        assert_eq!(series.raw.unwrap(), [(1000.0, 4.0), (3000.0, 2.0)]);
+        assert_eq!(series.raw.unwrap().1, [(1000.0, 4.0), (3000.0, 2.0)]);
         assert_eq!(series.points, [(1000.0, 4.0), (3000.0, 3.0)]);
         let series = training_series("run".into(), &budgets, "loss", &query, Axis::FloatingPointOperations);
         assert_eq!(series.points, [(1e12, 4.0), (3e12, 3.0)]);
@@ -3269,6 +3358,61 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
             curve(&budgets, "loss", &query, Axis::FloatingPointOperations, Smoothing::Raw),
             [(1e12, 4.0)]
         );
+    }
+
+    #[test]
+    fn gaussian_is_centered_and_agrees_with_distance_weighted_reference() {
+        let points: Vec<(f64, f64)> = (0..=100)
+            .map(|index| {
+                let distance = f64::from(index.min(100 - index));
+                let x = if index <= 50 {
+                    distance * distance
+                } else {
+                    5000.0 - distance * distance
+                };
+                (x, if index == 50 { 10.0 } else { 1.0 })
+            })
+            .collect();
+        let smoothed = gaussian_curve(&points, 0.05);
+        for (index, &(x, y)) in smoothed.iter().enumerate() {
+            let mut numerator = 0.0;
+            let mut denominator = 0.0;
+            for &(neighbor, value) in &points {
+                let weight = (-0.5 * ((neighbor - x) / 250.0).powi(2)).exp();
+                numerator += weight * value;
+                denominator += weight;
+            }
+            assert!((y - numerator / denominator).abs() < 0.002);
+            assert!((1.0..=10.0).contains(&y));
+            assert!((y - smoothed[100 - index].1).abs() < 1e-10);
+        }
+        assert!(smoothed[50].1 > smoothed[49].1);
+        assert!(smoothed[50].1 > smoothed[51].1);
+        for value in [0.0, 1.0, -1.0, f64::MAX, -f64::MAX] {
+            assert_eq!(
+                gaussian_curve(&[(0.0, value), (1.0, value)], 0.01),
+                [(0.0, value), (1.0, value)]
+            );
+        }
+        let records: Vec<Record> = points
+            .iter()
+            .map(|&(x, y)| Record(vec![("step".into(), x), ("loss".into(), y)]))
+            .collect();
+        let full = training_series(
+            "run".into(),
+            &records,
+            "loss",
+            &Query::parse("smoothing=gaussian&bandwidth=5").unwrap(),
+            Axis::Step,
+        );
+        let cropped = training_series(
+            "run".into(),
+            &records,
+            "loss",
+            &Query::parse("smoothing=gaussian&bandwidth=5&start=1600&end=3400").unwrap(),
+            Axis::Step,
+        );
+        assert_eq!(cropped.points, full.points[40..=60]);
     }
 
     #[test]
@@ -3329,6 +3473,9 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
             "smooth=0",
             "smooth=101",
             "smoothing=bogus",
+            "bandwidth=0",
+            "bandwidth=11",
+            "bandwidth=NaN",
             "minimum=NaN",
             "axis=bogus",
             "start=Infinity",

@@ -268,7 +268,9 @@ def recovery(page: Page, address: str) -> None:
             page.locator("#training-performance tr").nth(1).locator("td").last
         ).to_have_text(expected)
 
-    budget_url = address + "/compare?run=demo/example&run=demo/run-50&metric=loss"
+    budget_url = (
+        address + "/compare?run=demo/example&run=demo/run-50&metric=loss&bandwidth=10"
+    )
     page.goto(budget_url)
     titles = [
         text.split(" ·", 1)[0]
@@ -277,16 +279,16 @@ def recovery(page: Page, address: str) -> None:
     loss = page.locator("figure").nth(titles.index("loss"))
     expect(loss.locator("svg.chart")).to_have_attribute("data-axis", "tokens seen")
     raw = loss.locator('polyline[data-label="demo/example (raw)"]')
-    ema = loss.locator('polyline[data-label="demo/example (EMA)"]')
+    smoothed = loss.locator('polyline[data-label="demo/example (Gaussian)"]')
     raw_samples = json.loads(raw.get_attribute("data-samples"))
-    ema_samples = json.loads(ema.get_attribute("data-samples"))
+    smoothed_samples = json.loads(smoothed.get_attribute("data-samples"))
     assert raw_samples[0] == [100, 4]
     assert raw_samples[-1] == [2100, 0.25]
-    assert ema_samples[-1][0] == 2100
-    assert 0.25 < ema_samples[-1][1] < 4
-    assert raw.get_attribute("stroke") == ema.get_attribute("stroke")
+    assert smoothed_samples[-1][0] == 2100
+    assert 0.25 < smoothed_samples[-1][1] < 4
+    assert raw.get_attribute("stroke") == smoothed.get_attribute("stroke")
     assert float(raw.get_attribute("stroke-opacity")) < float(
-        ema.get_attribute("stroke-opacity")
+        smoothed.get_attribute("stroke-opacity")
     )
     page.goto(budget_url + "&axis=flops")
     expect(loss.locator("svg.chart")).to_have_attribute("data-axis", "FLOPs")

@@ -7,14 +7,14 @@ pub const PAGE_BYTES_MAX: u32 = 32 << 20;
 pub struct Series {
     pub label: String,
     pub points: Vec<(f64, f64)>,
-    pub raw: Option<Vec<(f64, f64)>>,
+    pub raw: Option<(&'static str, Vec<(f64, f64)>)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TraceStyle {
     Main,
     Raw,
-    ExponentialMovingAverage,
+    Smoothed(&'static str),
 }
 
 pub fn encode(value: &str) -> String {
@@ -222,11 +222,9 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
     let mut high_y = f64::NEG_INFINITY;
     let mut traces = Vec::new();
     for line in series.iter().take(32) {
-        if let Some(raw) = &line.raw {
+        let style = if let Some((method, raw)) = &line.raw {
             traces.push((line.label.as_str(), raw.as_slice(), TraceStyle::Raw));
-        }
-        let style = if line.raw.is_some() {
-            TraceStyle::ExponentialMovingAverage
+            TraceStyle::Smoothed(method)
         } else {
             TraceStyle::Main
         };
@@ -322,8 +320,8 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
             output.attribute("style", &format!("color:{colour}"))?;
             output.trusted(TrustedHtml(">"))?;
             output.text(label)?;
-            if *style == TraceStyle::ExponentialMovingAverage {
-                output.text(" (EMA)")?;
+            if let TraceStyle::Smoothed(method) = style {
+                output.text(&format!(" ({method})"))?;
             }
             output.text(": ")?;
             output.text(last)?;
@@ -334,7 +332,7 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
         output.each(&lines, |output, (colour, path, label, _, samples, style)| {
             let label = match style {
                 TraceStyle::Raw => format!("{label} (raw)"),
-                TraceStyle::ExponentialMovingAverage => format!("{label} (EMA)"),
+                TraceStyle::Smoothed(method) => format!("{label} ({method})"),
                 TraceStyle::Main => (*label).to_string(),
             };
             html! { output,
@@ -958,7 +956,7 @@ mod tests {
                     &[Series {
                         label: "<run>".into(),
                         points: vec![(-1e308, -1e308), (1e308, 1e308), (2.0, f64::NAN)],
-                        raw: Some(vec![(-1e308, -1e308), (1e308, 1e308)]),
+                        raw: Some(("EMA", vec![(-1e308, -1e308), (1e308, 1e308)])),
                     }],
                 )
             },
