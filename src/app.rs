@@ -571,7 +571,7 @@ pub fn route(settings: &Settings, target: &str) -> Response {
         return Response::error(400, "Smoothing window must be between 1 and 100");
     }
     if MetricAggregation::parse(query.get("aggregate")).is_none() {
-        return Response::error(400, "aggregate must be latest, mean, min or max");
+        return Response::error(400, "aggregate must be latest, mean, median, min or max");
     }
     if Smoothing::parse(query.get("smoothing"), data::MetricKind::Training).is_none() {
         return Response::error(400, "smoothing must be auto, raw, mean, ema or gaussian");
@@ -1069,6 +1069,7 @@ fn controls(
                                         for (kind, label) in [
                                             (MetricAggregation::Latest, "Latest"),
                                             (MetricAggregation::Mean, "Mean"),
+                                            (MetricAggregation::Median, "Median"),
                                             (MetricAggregation::Min, "Min"),
                                             (MetricAggregation::Max, "Max"),
                                         ] {
@@ -1414,6 +1415,7 @@ impl Smoothing {
 enum MetricAggregation {
     Latest,
     Mean,
+    Median,
     Min,
     Max,
 }
@@ -1423,6 +1425,7 @@ impl MetricAggregation {
         match value {
             "" | "latest" => Some(Self::Latest),
             "mean" => Some(Self::Mean),
+            "median" => Some(Self::Median),
             "min" => Some(Self::Min),
             "max" => Some(Self::Max),
             _ => None,
@@ -1433,6 +1436,7 @@ impl MetricAggregation {
         match self {
             Self::Latest => "latest",
             Self::Mean => "mean",
+            Self::Median => "median",
             Self::Min => "min",
             Self::Max => "max",
         }
@@ -1445,6 +1449,7 @@ fn metric_value(log: &[Record], key: &str, aggregation: MetricAggregation) -> Op
         MetricAggregation::Latest => log.iter().rev().find_map(|record| record.get(key)),
         MetricAggregation::Min => values.reduce(f64::min),
         MetricAggregation::Max => values.reduce(f64::max),
+        MetricAggregation::Median => median(values),
         MetricAggregation::Mean => {
             let count = values.clone().count();
             if count == 0 {
@@ -1454,6 +1459,25 @@ fn metric_value(log: &[Record], key: &str, aggregation: MetricAggregation) -> Op
             mean.is_finite().then_some(mean)
         }
     }
+}
+
+fn median(values: impl Iterator<Item = f64>) -> Option<f64> {
+    let mut values: Vec<f64> = values.filter(|value| value.is_finite()).collect();
+    if values.is_empty() {
+        return None;
+    }
+    let count = values.len();
+    debug_assert!(count <= data::RECORDS_MAX);
+    let (lower, middle, _) = values.select_nth_unstable_by(count / 2, f64::total_cmp);
+    if count % 2 == 1 {
+        return Some(*middle);
+    }
+    let lower = lower
+        .iter()
+        .copied()
+        .max_by(f64::total_cmp)
+        .expect("even nonempty sample has a lower half");
+    Some(lower.midpoint(*middle))
 }
 
 struct MetricPage {
@@ -1753,7 +1777,7 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> RenderRes
                 <h2>"Training performance"</h2>
                 <p>
                     "Value summary: "{aggregation.as_str()}
-                    " of retained reported samples. Mean is arithmetic, not time-weighted or a recomputed whole-run throughput. Step durations are converted from seconds to milliseconds. Not reported means no valid value was found in retained history."
+                    " for step durations. Throughput always shows the median of retained valid nonnegative samples, not a time-weighted or whole-run rate. For an even sample count, median averages the two middle values. Step durations are converted from seconds to milliseconds. Not reported means no valid value was found in retained history."
                 </p>
                 <div class="table-scroll" role="region" aria-label="Training performance" tabindex="0">
                     <table id="training-performance">
@@ -1761,7 +1785,7 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> RenderRes
                             <th>"Run"</th>
                             <th>"Mean ms/step"</th>
                             <th>"Max ms/step"</th>
-                            <th>"Tokens/sec"</th>
+                            <th>"Median tokens/sec"</th>
                         </tr>
                         {|output| {
                             for (entry, log) in selected.iter().zip(&logs) {
@@ -1769,12 +1793,26 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> RenderRes
                                     <tr>
                                         <td class="run-name">{entry.id()}</td>
                                         {|output| {
-                                            for (key, scale) in [
-                                                ("train/step_seconds_mean", 1000.0),
-                                                ("train/step_seconds_max", 1000.0),
-                                                ("train/tokens_per_second", 1.0),
+                                            for (value, scale) in [
+                                                (
+                                                    metric_value(log, "train/step_seconds_mean", aggregation),
+                                                    1000.0,
+                                                ),
+                                                (
+                                                    metric_value(log, "train/step_seconds_max", aggregation),
+                                                    1000.0,
+                                                ),
+                                                (
+                                                    median(
+                                                        log
+                                                            .iter()
+                                                            .filter_map(|record| record.get("train/tokens_per_second"))
+                                                            .filter(|value| *value >= 0.0),
+                                                    ),
+                                                    1.0,
+                                                ),
                                             ] {
-                                                let value = metric_value(log, key, aggregation)
+                                                let value = value
                                                     .filter(|value| *value >= 0.0)
                                                     .map(|value| value * scale)
                                                     .filter(|value| value.is_finite())
@@ -3103,6 +3141,7 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
         for (aggregation, expected) in [
             (MetricAggregation::Latest, 5000.0),
             (MetricAggregation::Mean, 3000.0),
+            (MetricAggregation::Median, 3000.0),
             (MetricAggregation::Min, 1000.0),
             (MetricAggregation::Max, 5000.0),
         ] {
@@ -3112,10 +3151,19 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
             );
             assert_eq!(metric_value(&log, "missing", aggregation), None);
         }
+        assert_eq!(median([1000.0, 2000.0, 3000.0, 1e12].into_iter()), Some(2500.0));
+        assert_eq!(median([1000.0, 2000.0, 1e12].into_iter()), Some(2000.0));
+        assert_eq!(median([f64::MAX, f64::MAX].into_iter()), Some(f64::MAX));
+        assert_eq!(median([-f64::MAX, f64::MAX].into_iter()), Some(0.0));
+        assert_eq!(median([f64::NAN, f64::INFINITY].into_iter()), None);
         let fixture = Fixture::new();
         assert_eq!(
-            route(&fixture.settings, "/compare?run=a/same&aggregate=median").status,
+            route(&fixture.settings, "/compare?run=a/same&aggregate=unknown").status,
             400
+        );
+        assert_eq!(
+            route(&fixture.settings, "/compare?run=a/same&aggregate=median").status,
+            200
         );
     }
 

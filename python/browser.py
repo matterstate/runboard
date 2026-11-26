@@ -159,10 +159,10 @@ def interactions(page: Page, address: str, log: Path) -> None:
     comparison_url = page.url
     performance = page.locator("#training-performance")
     expect(performance.locator("th")).to_have_text(
-        ["Run", "Mean ms/step", "Max ms/step", "Tokens/sec"]
+        ["Run", "Mean ms/step", "Max ms/step", "Median tokens/sec"]
     )
     expect(performance.locator("tr").nth(1).locator("td")).to_have_text(
-        ["demo/example", "25", "40", "4000"]
+        ["demo/example", "25", "40", "2500"]
     )
     expect(performance.locator("tr").nth(2)).to_contain_text("Not reported")
     titles = [
@@ -182,7 +182,7 @@ def interactions(page: Page, address: str, log: Path) -> None:
         assert region.evaluate("node => node.scrollLeft > 0")
     page.set_viewport_size({"width": 1280, "height": 900})
     page.goto(comparison_url + "&metric=missing")
-    expect(page.locator("#training-performance tr").nth(1)).to_contain_text("4000")
+    expect(page.locator("#training-performance tr").nth(1)).to_contain_text("2500")
     expect(page.locator(".empty")).to_contain_text("No matching metric")
     page.goto(address + "/?name=example")
     expect(page.locator('input[name=run][value="demo/example"]')).to_be_checked()
@@ -255,6 +255,7 @@ def recovery(page: Page, address: str) -> None:
     page.locator("#chart-filters input[name=metric]").fill("train/tokens_per_second")
     for aggregation, expected in [
         ("mean", "2500"),
+        ("median", "2500"),
         ("min", "1000"),
         ("max", "4000"),
         ("latest", "4000"),
@@ -266,7 +267,7 @@ def recovery(page: Page, address: str) -> None:
         )
         expect(
             page.locator("#training-performance tr").nth(1).locator("td").last
-        ).to_have_text(expected)
+        ).to_have_text("2500")
 
     budget_url = (
         address + "/compare?run=demo/example&run=demo/run-50&metric=loss&bandwidth=10"

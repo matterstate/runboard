@@ -131,16 +131,20 @@ evaluation loss. The index's metric-range filter still takes an exact metric
 key.
 
 Comparisons and static reports include a training-performance table with the
-reported mean and maximum ms/step and tokens/sec for every selected run. It
-reads `train/step_seconds_mean`, `train/step_seconds_max` (converted to
+reported mean and maximum ms/step and **Median tokens/sec** for every selected
+run. It reads `train/step_seconds_mean`, `train/step_seconds_max` (converted to
 milliseconds), and `train/tokens_per_second` independently of the chart filter
-and preview limits. These are trainer-reported values, not recomputed whole-run
-averages; missing or invalid values show **Not reported**.
+and preview limits. Summaries use trainer-reported samples, not recomputed
+whole-run rates; missing or invalid values show **Not reported**. Throughput
+always uses the median of retained finite, nonnegative throughput samples,
+reducing sensitivity to occasional spikes and stalls without choosing an outlier
+cutoff. An even sample count uses the midpoint of the two middle values.
 
 The **Metric values** table compares any reported numeric metric across runs.
 Search by name or use **Next metrics** and **First metrics** to browse 32
 metrics at a time without an unbounded metric catalogue. **Value summary**
-selects Latest, Mean, Min or Max for both comparison tables. Mean is the
+selects Latest, Mean, Median, Min or Max for the metric table and performance
+step durations; the throughput performance column stays median. Mean is the
 arithmetic mean of retained reported samples, not a time-weighted rate or total
 tokens divided by total training time. Missing samples are neither filled nor
 counted as zero. Charts keep their observations; table reductions do not alter
