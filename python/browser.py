@@ -224,6 +224,23 @@ def interactions(page: Page, address: str, log: Path) -> None:
                         (innerWidth < 600 ||
                             Math.abs(row.width - form.clientWidth) < 2);
                 }"""), f"runs table does not fill available width at {width}px"
+    page.goto(address + "/jobs")
+    history = page.locator("#completion-history")
+    expect(history.locator("tr")).to_have_count(3)
+    expect(history.locator("tr").nth(1)).to_contain_text("demo/44")
+    expect(history.locator("tr").nth(2)).to_contain_text("Killed")
+    expect(history).not_to_contain_text("demo/42")
+    for width in [390, 320]:
+        page.set_viewport_size({"width": width, "height": 900})
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        region = page.get_by_role("region", name="Completion history", exact=True)
+        region.evaluate("node => { node.scrollLeft = 1000; }")
+        assert region.evaluate("node => node.scrollLeft > 0")
+    page.locator("details summary").filter(has_text="Queue filters").click()
+    page.locator("input[name=group]").fill("gpu")
+    page.get_by_role("button", name="Filter", exact=True).click()
+    expect(history.locator("tr")).to_have_count(2)
+    expect(history.locator("tr").nth(1)).to_contain_text("demo/41")
     page.goto(address + "/?name=mobile")
     name_cell = page.locator("#run-selection table tr").nth(1).locator("td").nth(1)
     assert 160 <= name_cell.bounding_box()["width"] <= 240
@@ -452,8 +469,42 @@ def main() -> None:
         (reports / f"{name}_meta.json").write_text('{"task_id":43}')
         (reports / "queue.json").write_text(
             json.dumps(
-                {"tasks": {"42": {"label": "demo/example", "status": "Running"}}}
+                {
+                    "tasks": {
+                        "42": {
+                            "label": "demo/example",
+                            "group": "gpu",
+                            "status": "Running",
+                        },
+                        "41": {
+                            "label": "finished_gpu",
+                            "group": "gpu",
+                            "status": {
+                                "Done": {
+                                    "result": "Killed",
+                                    "start": "2026-11-25T17:00:00Z",
+                                    "end": "2026-11-25T20:00:00+02:00",
+                                }
+                            },
+                        },
+                        "44": {
+                            "label": "finished_cpu",
+                            "group": "cpu",
+                            "status": {
+                                "Done": {
+                                    "result": "Success",
+                                    "start": "2026-11-25T17:00:00Z",
+                                    "end": "2026-11-25T18:30:00Z",
+                                }
+                            },
+                        },
+                    }
+                }
             )
+        )
+        (reports / "jobs.jsonl").write_text(
+            '{"id":42,"group":"gpu","outcome":"Success","end":"2027-01-01T00:00:00Z"}\n'
+            '{"id":41,"group":"gpu","outcome":"Success","end":"2026-11-20T00:00:00Z"}\n'
         )
         address = f"http://127.0.0.1:{available_port()}"
         with (root / "server.log").open("w") as output:

@@ -2552,6 +2552,97 @@ fn queue_run<'a>(
     }
 }
 
+struct Completion {
+    source: String,
+    id: String,
+    job: data::Job,
+    ended: Option<time::OffsetDateTime>,
+}
+
+fn completion_time(value: &str) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()
+}
+
+fn completion_history(
+    settings: &Settings,
+    snapshots: &[(String, String)],
+    sources: &[(String, PathBuf)],
+    group: &str,
+) -> Vec<Completion> {
+    let shared = settings.pueue.is_some() || settings.queue.is_some();
+    let mut history: BTreeMap<(String, String), data::Job> = BTreeMap::new();
+    for (source, path) in sources {
+        for job in data::jobs(path, 100) {
+            let source = if shared { "shared" } else { source };
+            let key = (source.to_string(), format!("{:.0}", job.id));
+            if let Some(previous) = history.get(&key) {
+                if completion_time(&previous.end) >= completion_time(&job.end) {
+                    continue;
+                }
+            }
+            history.insert(key, job);
+        }
+    }
+    for (source, snapshot) in snapshots {
+        let Ok(tasks) = queue::tasks(snapshot) else { continue };
+        for task in tasks {
+            let key = (source.clone(), task.id.clone());
+            let previous = history.remove(&key);
+            if task.state != "Done" {
+                continue;
+            }
+            let mut finished = task.finished.unwrap_or_default();
+            let start = completion_time(&finished.start);
+            let end = completion_time(&finished.end);
+            let faults = previous
+                .filter(|job| {
+                    if start.is_none() || end.is_none() {
+                        return false;
+                    }
+                    start == completion_time(&job.start) && end == completion_time(&job.end)
+                })
+                .map(|job| {
+                    if let ("Success", "finished-with-faults") = (finished.outcome.as_str(), job.outcome.as_str()) {
+                        finished.outcome = job.outcome;
+                    }
+                    job.faults
+                })
+                .unwrap_or_default();
+            history.insert(
+                key,
+                data::Job {
+                    id: task.id.parse().expect("bounded decimal task id"),
+                    label: task.label,
+                    group: task.group,
+                    outcome: finished.outcome,
+                    start: finished.start,
+                    end: finished.end,
+                    faults,
+                },
+            );
+        }
+    }
+    let mut history: Vec<Completion> = history
+        .into_iter()
+        .filter(|(_, job)| group.is_empty() || job.group == group)
+        .map(|((source, id), job)| Completion {
+            ended: completion_time(&job.end),
+            source,
+            id,
+            job,
+        })
+        .collect();
+    history.sort_by(|a, b| {
+        b.ended
+            .cmp(&a.ended)
+            .then_with(|| a.source.cmp(&b.source))
+            .then_with(|| b.id.parse::<u64>().ok().cmp(&a.id.parse::<u64>().ok()))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    history.truncate(100);
+    history
+}
+
 fn jobs(settings: &Settings, query: &Query) -> RenderResult<String> {
     let runs = entries(settings);
     let mut warnings = Vec::new();
@@ -2617,90 +2708,102 @@ fn jobs(settings: &Settings, query: &Query) -> RenderResult<String> {
             let mut queue_errors = Vec::new();
             html! { output,
                 <h2>"Live tasks"</h2>
-                <table>
-                    <tr>
-                        <th>"Queue / task"</th>
-                        <th>"Group"</th>
-                        <th>"State"</th>
-                        <th>"Label / run"</th>
-                        <th>"Dependencies"</th>
-                    </tr>
-                    {|output| {
-                        for (source, snapshot) in &snapshots {
-                            let tasks = match queue::tasks(snapshot) {
-                                Ok(tasks) => tasks,
-                                Err(error) => {
-                                    queue_errors.push(format!("{source}: {error}"));
-                                    continue;
-                                }
-                            };
-                            for task in tasks {
-                                if task.state == "Done" && query.get("completed") != "1" {
-                                    continue;
-                                }
-                                if !query.get("group").is_empty() && task.group != query.get("group") {
-                                    continue;
-                                }
-                                let associated = queue_run(settings, source, &task, &runs);
-                                html! { output,
-                                    <tr id=format!("task-{}-{}", encode(source), encode(&task.id))>
-                                        <td>{source}"/"{task.id}</td>
-                                        <td>{task.group}</td>
-                                        <td>{task.state}</td>
-                                        <td>
-                                            {|output| {
-                                                if let Some(entry) = associated {
-                                                    html! { output,
-                                                        <a href=format!(
-                                                            "/run?run={}",
-                                                            encode(&entry.id()),
-                                                        )>{entry.id()}</a>
+                <div class="table-scroll" role="region" aria-label="Live tasks" tabindex="0">
+                    <table>
+                        <tr>
+                            <th>"Queue / task"</th>
+                            <th>"Group"</th>
+                            <th>"State"</th>
+                            <th>"Label / run"</th>
+                            <th>"Dependencies"</th>
+                        </tr>
+                        {|output| {
+                            for (source, snapshot) in &snapshots {
+                                let tasks = match queue::tasks(snapshot) {
+                                    Ok(tasks) => tasks,
+                                    Err(error) => {
+                                        queue_errors.push(format!("{source}: {error}"));
+                                        continue;
+                                    }
+                                };
+                                for task in tasks {
+                                    if task.state == "Done" && query.get("completed") != "1" {
+                                        continue;
+                                    }
+                                    if !query.get("group").is_empty() && task.group != query.get("group") {
+                                        continue;
+                                    }
+                                    let associated = queue_run(settings, source, &task, &runs);
+                                    html! { output,
+                                        <tr id=format!("task-{}-{}", encode(source), encode(&task.id))>
+                                            <td>{source}"/"{task.id}</td>
+                                            <td>{task.group}</td>
+                                            <td>{task.state}</td>
+                                            <td>
+                                                {|output| {
+                                                    if let Some(entry) = associated {
+                                                        html! { output,
+                                                            <a href=format!(
+                                                                "/run?run={}",
+                                                                encode(&entry.id()),
+                                                            )>{entry.id()}</a>
+                                                        }
+                                                    } else {
+                                                        output.text(&task.label)
                                                     }
-                                                } else {
-                                                    output.text(&task.label)
-                                                }
-                                            }}
-                                        </td>
-                                        <td>
-                                            {|output| {
-                                                for (index, id) in task.dependencies.iter().enumerate() {
-                                                    if index > 0 {
-                                                        output.text(", ")?;
+                                                }}
+                                            </td>
+                                            <td>
+                                                {|output| {
+                                                    for (index, id) in task.dependencies.iter().enumerate() {
+                                                        if index > 0 {
+                                                            output.text(", ")?;
+                                                        }
+                                                        html! { output,
+                                                            <a href=format!(
+                                                                "/jobs?completed=1#task-{}-{}",
+                                                                encode(source),
+                                                                encode(id),
+                                                            )>{id}</a>
+                                                        }?;
                                                     }
-                                                    html! { output,
-                                                        <a href=format!(
-                                                            "/jobs?completed=1#task-{}-{}",
-                                                            encode(source),
-                                                            encode(id),
-                                                        )>{id}</a>
-                                                    }?;
-                                                }
-                                                Ok(())
-                                            }}
-                                        </td>
-                                    </tr>
-                                }?;
+                                                    Ok(())
+                                                }}
+                                            </td>
+                                        </tr>
+                                    }?;
+                                }
                             }
-                        }
-                        Ok(())
-                    }}
-                </table>
+                            Ok(())
+                        }}
+                    </table>
+                </div>
             }?;
             notice(output, &queue_errors)?;
             html! { output,
                 <h2>"Completion history"</h2>
-                <table>
-                    <tr>
-                        <th>"Project / task"</th>
-                        <th>"Label"</th>
-                        <th>"Outcome"</th>
-                        <th>"Start"</th>
-                        <th>"End"</th>
-                        <th>"Faults"</th>
-                    </tr>
-                    {|output| {
-                        for (source, path) in &sources {
-                            for job in data::jobs(path, 100) {
+                <p class="dim">
+                    "Newest 100 retained completions by end time. Live queue state takes precedence over archived callbacks, including restarted tasks. Fault details require a matching archived attempt. Live history retains up to 100 recently finished tasks plus the newest 64 task IDs; group filtering applies within retained history."
+                </p>
+                <div class="table-scroll" role="region" aria-label="Completion history" tabindex="0">
+                    <table id="completion-history">
+                        <tr>
+                            <th>"Queue / task"</th>
+                            <th>"Label"</th>
+                            <th>"Group"</th>
+                            <th>"Outcome"</th>
+                            <th>"Start"</th>
+                            <th>"End"</th>
+                            <th>"Faults"</th>
+                        </tr>
+                        {|output| {
+                            for completion in completion_history(
+                                settings,
+                                &snapshots,
+                                &sources,
+                                query.get("group"),
+                            ) {
+                                let job = completion.job;
                                 let faults = job
                                     .faults
                                     .iter()
@@ -2709,8 +2812,15 @@ fn jobs(settings: &Settings, query: &Query) -> RenderResult<String> {
                                     .join(", ");
                                 html! { output,
                                     <tr>
-                                        <td>{source}"/"{number(job.id)}</td>
-                                        <td>{job.label}</td>
+                                        <td>{completion.source}"/"{completion.id}</td>
+                                        <td>
+                                            {if job.label.is_empty() {
+                                                "Unlabelled task"
+                                            } else {
+                                                &job.label
+                                            }}
+                                        </td>
+                                        <td>{job.group}</td>
                                         <td class={if job.outcome == "Success" {
                                             "good"
                                         } else {
@@ -2722,10 +2832,10 @@ fn jobs(settings: &Settings, query: &Query) -> RenderResult<String> {
                                     </tr>
                                 }?;
                             }
-                        }
-                        Ok(())
-                    }}
-                </table>
+                            Ok(())
+                        }}
+                    </table>
+                </div>
             }
         },
         false,
@@ -3248,6 +3358,47 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
         let diagnostics = fixture.text("/diagnostics");
         assert!(diagnostics.contains("same_meta.json"));
         assert!(diagnostics.contains("invalid or partial"));
+    }
+
+    #[test]
+    fn completion_history_merges_authoritative_state_and_sorts_instants() {
+        let mut fixture = Fixture::new();
+        let a = fixture.root.join("a/reports/jobs.jsonl");
+        let b = fixture.root.join("b/reports/jobs.jsonl");
+        fs::write(&a, concat!(
+            "{\"id\":2,\"group\":\"gpu\",\"outcome\":\"Success\",\"end\":\"2026-11-25T18:30:00Z\"}\n",
+            "{\"id\":1,\"group\":\"gpu\",\"outcome\":\"Success\",\"end\":\"2026-11-25T20:00:00+02:00\"}\n",
+            "{\"id\":3,\"group\":\"gpu\",\"outcome\":\"Success\",\"start\":\"old\",\"end\":\"2026-11-25T17:00:00Z\",\"faults\":{\"old\":9}}\n",
+            "{\"id\":7,\"group\":\"gpu\",\"outcome\":\"Success\",\"end\":\"2027-01-01T00:00:00Z\"}\n"
+        )).unwrap();
+        fs::write(&b, "{\"id\":3,\"label\":\"archive\",\"group\":\"gpu\",\"outcome\":\"finished-with-faults\",\"start\":\"2026-11-25T20:00:00+01:00\",\"end\":\"2026-11-25T22:00:00+02:00\",\"faults\":{\"retry\":2}}\n").unwrap();
+        let live = r#"{"tasks":{"3":{"label":"live","group":"cpu","status":{"Done":{"result":"Killed","start":"2026-11-25T18:40:00Z","end":"2026-11-25T19:00:00Z"}}},"7":{"status":"Queued"}}}"#;
+        let other = r#"{"tasks":{"3":{"label":"other","group":"gpu","status":{"Done":{"result":"Success","start":"2026-11-25T19:00:00Z","end":"2026-11-25T20:00:00Z"}}}}}"#;
+        let sources = vec![("a".into(), a), ("b".into(), b)];
+        let snapshots = vec![("a".into(), live.into()), ("b".into(), other.into())];
+        let history = completion_history(&fixture.settings, &snapshots, &sources, "");
+        assert_eq!(
+            history
+                .iter()
+                .map(|row| (row.source.as_str(), row.id.as_str()))
+                .collect::<Vec<_>>(),
+            [("b", "3"), ("a", "3"), ("a", "2"), ("a", "1")]
+        );
+        assert_eq!(history[0].job.faults, [("retry".into(), 2.0)]);
+        assert_eq!(history[0].job.outcome, "finished-with-faults");
+        assert!(history[1].job.faults.is_empty());
+        assert_eq!(history[1].job.outcome, "Killed");
+        assert_eq!(
+            completion_history(&fixture.settings, &snapshots, &sources, "gpu").len(),
+            3
+        );
+        fixture.settings.queue = Some(fixture.root.join("shared.json"));
+        let shared = vec![("shared".into(), live.into())];
+        let history = completion_history(&fixture.settings, &shared, &sources, "");
+        assert_eq!(history.len(), 3);
+        assert!(history.iter().all(|row| row.source == "shared"));
+        assert_eq!(history[0].id, "3");
+        assert_eq!(history[0].job.outcome, "Killed");
     }
 
     #[test]

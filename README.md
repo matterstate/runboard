@@ -329,18 +329,29 @@ Read the existing callback history and live Pueue state:
 ```
 
 `--pueue -` uses the default Pueue configuration. Polling combines all active
-tasks with the 64 most recent tasks, so old queue history does not exhaust the 4
-MiB input budget. Recent status takes precedence when a task changes between
-queries. Each query times out after two seconds; results are cached for five
-seconds. Alternatively, use `--queue <snapshot>` or per-project
+tasks with the 64 newest task IDs and 100 tasks ordered by completion time, so a
+long-running older task is retained when it finishes. The merged snapshot is
+limited to 1024 tasks and 4 MiB. Later query results take precedence when a task
+changes between queries. Each query times out after two seconds; results are
+cached for five seconds. Alternatively, use `--queue <snapshot>` or per-project
 `reports/queue.json`. Task IDs in metadata and project-qualified labels link
 queue tasks to runs. Dependencies link to their tasks. Runboard does not change
 the queue.
 
 ![Queue history and live tasks](images/jobs.webp)
 
-Completion records use `id`, `label`, `outcome`, `start`, `end` and a `faults`
-object. `finished-with-faults` remains distinct from `Success`. Commands,
+Completion history merges live finished tasks with up to 100 archived callback
+records per file, deduplicates queue-scoped task IDs, applies the group filter,
+and displays the newest 100 retained completions by timestamp (including
+timezone offsets). With a shared queue, callback files refer to that queue's ID
+namespace; per-project queues otherwise remain separate. Current queue state
+wins over stale callbacks: a restarted task is not shown as completed. Matching
+callback attempts can supply fault details and preserve `finished-with-faults`;
+fault details from older attempts are not reused.
+
+Completion records use `id`, `label`, optional `group`, `outcome`, `start`,
+`end` and a `faults` object. Missing groups do not match a specific group
+filter. `finished-with-faults` remains distinct from `Success`. Commands,
 working paths and raw output are not displayed.
 
 Telemetry records have Unix-epoch `time`, optional string `host`/`device`, and

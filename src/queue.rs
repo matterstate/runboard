@@ -14,12 +14,30 @@ pub struct Task {
     pub state: String,
     pub directory: String,
     pub dependencies: Vec<String>,
+    pub finished: Option<Finished>,
+}
+
+pub struct Finished {
+    pub outcome: String,
+    pub start: String,
+    pub end: String,
+}
+
+impl Default for Finished {
+    fn default() -> Self {
+        Self {
+            outcome: "Unknown".into(),
+            start: String::new(),
+            end: String::new(),
+        }
+    }
 }
 
 pub fn snapshot(config: &Path) -> Result<String, String> {
     let active = snapshot_query(config, "status!=success status!=failed")?;
     let recent = snapshot_query(config, "order_by id desc first 64")?;
-    merge_snapshots(&active, &recent)
+    let finished = snapshot_query(config, "order_by end desc first 100")?;
+    merge_snapshots(&merge_snapshots(&active, &recent)?, &finished)
 }
 
 fn merge_snapshots(active: &str, recent: &str) -> Result<String, String> {
@@ -99,7 +117,7 @@ pub fn tasks(body: &str) -> Result<Vec<Task>, String> {
         let Some((id, field)) = path.split_once('.') else {
             continue;
         };
-        if !id.bytes().all(|byte| byte.is_ascii_digit()) || id.len() > 16 {
+        if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) || id.len() > 16 {
             continue;
         }
         if tasks.len() == 1024 && !tasks.contains_key(id) {
@@ -112,7 +130,26 @@ pub fn tasks(body: &str) -> Result<Vec<Task>, String> {
             state: "unknown".into(),
             directory: String::new(),
             dependencies: Vec::new(),
+            finished: None,
         });
+        if field.starts_with("status.Done.") {
+            task.state = "Done".into();
+            let finished = task.finished.get_or_insert_with(Finished::default);
+            match (field, value) {
+                ("status.Done.start", Scalar::Text(value)) => finished.start = value.clone(),
+                ("status.Done.end", Scalar::Text(value)) => finished.end = value.clone(),
+                ("status.Done.result", Scalar::Text(value)) => finished.outcome = value.clone(),
+                ("status.Done.result.Failed", Scalar::Number(code)) => {
+                    finished.outcome = format!("Failed (exit {code:.0})")
+                }
+                _ => {
+                    if let Some(kind) = field.strip_prefix("status.Done.result.") {
+                        finished.outcome = kind.split('.').next().unwrap_or("Unknown").into();
+                    }
+                }
+            }
+            continue;
+        }
         match (field, value) {
             ("label", Scalar::Text(value)) => task.label = value.clone(),
             ("group", Scalar::Text(value)) => task.group = value.clone(),
@@ -143,6 +180,17 @@ mod tests {
         assert!(tasks.iter().any(|task| task.id == "1" && task.state == "Running"));
         assert!(tasks.iter().any(|task| task.id == "99" && task.state == "Done"));
         assert!(merge_snapshots("{}", "{}").is_err());
+    }
+
+    #[test]
+    fn finished_tasks_preserve_outcomes_without_exposing_error_messages() {
+        let tasks = tasks(r#"{"tasks":{"1":{"status":{"Done":{"result":"Success","start":"start","end":"end"}}},"2":{"status":{"Done":{"result":"Killed"}}},"3":{"status":{"Done":{"result":{"Failed":42}}}},"4":{"status":{"Done":{"result":{"Errored":"private command details"}}}}}}"#).unwrap();
+        let outcomes: Vec<&str> = tasks
+            .iter()
+            .map(|task| task.finished.as_ref().unwrap().outcome.as_str())
+            .collect();
+        assert_eq!(outcomes, ["Success", "Killed", "Failed (exit 42)", "Errored"]);
+        assert_eq!(tasks[0].finished.as_ref().unwrap().end, "end");
     }
 
     #[test]
