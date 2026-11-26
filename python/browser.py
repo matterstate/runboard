@@ -12,6 +12,13 @@ from pathlib import Path
 
 from playwright.sync_api import Page, Route, expect, sync_playwright
 
+COMPARISON_NAMES = [
+    "shared-model-configuration-and-optimizer-"
+    + "long-prefix-" * 3
+    + f"variant-{index}"
+    for index in range(6)
+]
+
 
 def available_port() -> int:
     with socket.socket() as connection:
@@ -32,7 +39,7 @@ def interactions(page: Page, address: str, log: Path) -> None:
     page.goto(address + "/run?run=demo/example")
     assert "loss" in page.locator("dl.metrics dt").all_text_contents()
     assert "loss" in [
-        title.split(" ·", 1)[0]
+        title.split(" ·", 1)[0].strip()
         for title in page.locator("figure figcaption").all_text_contents()
     ]
     page.evaluate("""() => {
@@ -103,9 +110,9 @@ def interactions(page: Page, address: str, log: Path) -> None:
     chart = figure.locator("svg.chart")
     chart.focus()
     chart.press("End")
-    expect(figure.locator("output")).to_contain_text(
-        "demo/example (raw): 0.5 at tokens seen 1,500"
-    )
+    expect(figure.locator(".chart-readout")).to_be_visible()
+    expect(figure.locator("[data-sample-raw]")).to_have_text("0.5")
+    expect(figure.locator("[data-sample-x]")).to_have_text("1.5K")
     figure.get_by_role("button", name="Zoom in", exact=True).click()
     assert chart.get_attribute("data-zoomed") == "1"
     page.mouse.move(0, 0)
@@ -166,7 +173,7 @@ def interactions(page: Page, address: str, log: Path) -> None:
     )
     expect(performance.locator("tr").nth(2)).to_contain_text("Not reported")
     titles = [
-        title.split(" ·", 1)[0]
+        title.split(" ·", 1)[0].strip()
         for title in page.locator("figure figcaption").all_text_contents()
     ]
     assert {
@@ -251,6 +258,98 @@ def interactions(page: Page, address: str, log: Path) -> None:
     expect(page.locator(".empty")).to_contain_text("No matching metric")
 
 
+def readability(page: Page, address: str) -> None:
+    page.goto(
+        address
+        + "/compare?"
+        + "&".join(f"run=demo/{name}" for name in COMPARISON_NAMES)
+        + "&metric=loss"
+    )
+    figure = page.locator("figure").first
+    expect(figure.locator(".legend > span")).to_have_count(6)
+    for item in figure.locator(".legend > span").all():
+        assert item.get_attribute("title").startswith("demo/")
+        assert len(item.locator(".legend-name").inner_text()) <= 42
+    chart = figure.locator("svg.chart")
+    chart.focus()
+    chart.press("End")
+    readout = figure.locator(".chart-readout")
+    expect(readout).to_be_visible()
+    expect(readout.locator("tbody tr")).to_have_count(6)
+    expect(
+        readout.locator("tbody tr").first.locator("[data-sample-value]")
+    ).to_have_text("—")
+    expect(
+        readout.locator("tbody tr").last.locator("[data-sample-value]")
+    ).not_to_have_text("—")
+    assert len(figure.locator("output").inner_text()) < 90
+    chart.press("Home")
+    expect(
+        readout.locator("tbody tr").first.locator("[data-sample-value]")
+    ).not_to_have_text("—")
+    readout.locator("summary").first.click()
+    expect(
+        readout.locator(".series-name").first.locator("[data-series-full]")
+    ).to_have_text("demo/" + COMPARISON_NAMES[0])
+    assert (
+        figure.locator('polyline[data-kind="raw"]').first.get_attribute(
+            "stroke-opacity"
+        )
+        == "0.12"
+    )
+    assert (
+        len(
+            set(
+                figure.locator('polyline[data-kind="value"]').evaluate_all(
+                    "lines => lines.map(line => getComputedStyle(line).stroke)"
+                )
+            )
+        )
+        == 6
+    )
+    for width in [1600, 900, 390, 320]:
+        page.set_viewport_size({"width": width, "height": 900})
+        page.wait_for_function(
+            """() => {
+                const plot = document.querySelector('svg.plot');
+                return Math.abs(plot.viewBox.baseVal.width -
+                    plot.getBoundingClientRect().width) < 1;
+            }"""
+        )
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        assert figure.locator(".legend").evaluate(
+            "node => node.scrollWidth <= node.clientWidth"
+        )
+        ticks = figure.locator("[data-x-tick]").all_text_contents()
+        assert all(len(tick) < 10 for tick in ticks), ticks
+        bounds = figure.locator("[data-x-tick]").evaluate_all(
+            """nodes => nodes.filter(node =>
+                getComputedStyle(node).display !== "none" &&
+                getComputedStyle(node).visibility !== "hidden"
+            ).map(node => {
+                const rect = node.getBoundingClientRect();
+                return [rect.left, rect.right];
+            })"""
+        )
+        assert all(left[1] + 4 <= right[0] for left, right in zip(bounds, bounds[1:]))
+    chart.focus()
+    chart.press("Escape")
+    expect(readout).to_be_hidden()
+    for path in [
+        "/run?run=demo/example&metric=accuracy",
+        "/run?run=demo/" + COMPARISON_NAMES[1] + "&axis=time&metric=loss",
+        "/device",
+    ]:
+        page.goto(address + path)
+        figure = page.locator("figure").first
+        chart = figure.locator("svg.chart")
+        chart.focus()
+        chart.press("End")
+        expect(figure.locator(".chart-readout")).to_be_visible()
+        assert len(figure.locator("output").inner_text()) < 100
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
 def recovery(page: Page, address: str) -> None:
     page.goto(address + "/compare?run=demo/example&run=demo/run-50&metric=temperature")
     values = page.locator("#metric-values")
@@ -291,7 +390,7 @@ def recovery(page: Page, address: str) -> None:
     )
     page.goto(budget_url)
     titles = [
-        text.split(" ·", 1)[0]
+        text.split(" ·", 1)[0].strip()
         for text in page.locator("figcaption").all_text_contents()
     ]
     loss = page.locator("figure").nth(titles.index("loss"))
@@ -323,7 +422,7 @@ def recovery(page: Page, address: str) -> None:
     page.locator("#chart-filters button").first.click()
     expect(page.locator("select[name=smoothing]")).to_have_value("ema")
     titles = [
-        text.split(" ·", 1)[0]
+        text.split(" ·", 1)[0].strip()
         for text in page.locator("figcaption").all_text_contents()
     ]
     samples = json.loads(
@@ -462,6 +561,41 @@ def main() -> None:
             modified = time.time() - 120 + index
             os.utime(path, (modified, modified))
             (reports / f"{name}_TRAINED").write_text("train exit 0")
+        for index, name in enumerate(COMPARISON_NAMES):
+            path = reports / f"{name}_train.log"
+            path.write_text(
+                "".join(
+                    json.dumps(
+                        {
+                            "step": step,
+                            "time": 1800000000 + step * 1.25,
+                            "loss": 0.8
+                            + index * 0.03
+                            - step * 0.01
+                            + (0.06 if step % 2 else -0.06),
+                            "train/tokens_seen": 180000
+                            + step * (140000 if index == 0 else 600000),
+                        }
+                    )
+                    + "\n"
+                    for step in range(9 if index == 0 else 30)
+                )
+            )
+            os.utime(path, (1, 1))
+        (reports / "device_telemetry.jsonl").write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "time": time.time() - 300 + step * 10,
+                        "host": "host",
+                        "device": "gpu0",
+                        "temperature": 60 + step / 10,
+                    }
+                )
+                + "\n"
+                for step in range(30)
+            )
+        )
         name = "mobile-" + "long-run-name-" * 12
         path = reports / f"{name}_train.log"
         path.write_text('{"step":1,"loss":1}\n')
@@ -556,6 +690,7 @@ def main() -> None:
                             close() {}
                         };""")
                         interactions(page, address, log)
+                        readability(page, address)
                         recovery(page, address)
                         assert not errors, errors
                         # Also exercise the real SSE connection.
@@ -576,9 +711,9 @@ def main() -> None:
                         )
                         touch.goto(address + "/run?run=demo/example&metric=loss")
                         touch.locator("svg.chart").last.tap()
-                        expect(touch.locator("figure output").last).to_contain_text(
-                            "demo/example (raw):"
-                        )
+                        expect(
+                            touch.locator("figure .chart-readout").last
+                        ).to_contain_text("demo/example")
                     finally:
                         browser.close()
             finally:

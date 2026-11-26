@@ -173,10 +173,28 @@ button { padding: .25rem .65rem; }
 table { border-collapse: collapse; max-width: 100%; display: block; overflow: auto; margin: .75rem 0 1.25rem; font-variant-numeric: tabular-nums; }
 th, td { text-align: left; padding: .6rem .8rem; border-bottom: 1px solid #ddd; vertical-align: top; }
 th { white-space: nowrap; }
-figure { margin: 1.5rem 0 2.5rem; width: 900px; max-width: 100%; }
+figure { margin: 1.5rem 0 2.5rem; width: 100%; min-width: 0; }
 figcaption { margin-bottom: .4rem; font-weight: 600; }
-.legend { display: flex; flex-wrap: wrap; gap: .25rem 1rem; margin-bottom: .5rem; }
-.legend span { min-width: 0; overflow-wrap: anywhere; }
+.legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 21rem), 1fr)); gap: .35rem 1rem; margin-bottom: .75rem; }
+.legend > span { display: flex; gap: .5rem; align-items: baseline; min-width: 0; }
+.legend-name { display: flex; min-width: 0; white-space: nowrap; }
+.legend-prefix { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.legend-suffix { flex-shrink: 0; }
+figure [data-colour="0"] { color: #0072b2; }
+figure [data-colour="1"] { color: #b54c00; }
+figure [data-colour="2"] { color: #007a57; }
+figure [data-colour="3"] { color: #6b4c9a; }
+figure [data-colour="4"] { color: #b44579; }
+figure [data-colour="5"] { color: #8c6d00; }
+figure [data-colour="6"] { color: #333333; }
+figure [data-colour="7"] { color: #5b6678; }
+.chart-readout { margin-top: .5rem; max-height: 22rem; }
+.chart-readout table { margin: 0; font-variant-numeric: tabular-nums; }
+.chart-readout td { padding: .35rem .5rem; }
+.chart-readout .series-name { min-width: 8rem; max-width: 20rem; margin: 0; }
+.series-name summary { overflow-wrap: anywhere; }
+.series-name > span { display: block; overflow-wrap: anywhere; color: #263445; }
+.chart-readout small { display: block; white-space: nowrap; color: #526070; }
 .plot { display: block; width: 100%; height: 252px; background: #f5f7fa; }
 .plot text { font: 12px system-ui,sans-serif; fill: #526070; }
 @media (max-width: 40rem) {
@@ -186,6 +204,10 @@ figcaption { margin-bottom: .4rem; font-weight: 600; }
     #live-status { grid-column: 1 / -1; min-height: 1.5rem; }
     .table-scroll .run-name { min-width: 10rem; max-width: 14rem; overflow-wrap: anywhere; }
     .plot [data-x-tick="0.25"], .plot [data-x-tick="0.75"] { display: none; }
+    .chart-readout th, .chart-readout td { padding: .35rem .25rem; }
+    .chart-readout th { white-space: normal; }
+    .chart-readout .series-name { min-width: 0; max-width: 4rem; }
+    .series-short { display: none; }
 }
 .chart { touch-action: pan-y; }
 .chart:active { cursor: crosshair; }
@@ -221,17 +243,17 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
     let mut low_y = f64::INFINITY;
     let mut high_y = f64::NEG_INFINITY;
     let mut traces = Vec::new();
-    for line in series.iter().take(32) {
+    for (series_index, line) in series.iter().take(32).enumerate() {
         let style = if let Some((method, raw)) = &line.raw {
-            traces.push((line.label.as_str(), raw.as_slice(), TraceStyle::Raw));
+            traces.push((line.label.as_str(), raw.as_slice(), TraceStyle::Raw, series_index));
             TraceStyle::Smoothed(method)
         } else {
             TraceStyle::Main
         };
-        traces.push((line.label.as_str(), line.points.as_slice(), style));
+        traces.push((line.label.as_str(), line.points.as_slice(), style, series_index));
     }
     let mut reduced = Vec::new();
-    for (_, line, _) in &traces {
+    for (_, line, _, _) in &traces {
         let points: Vec<(f64, f64)> = line
             .iter()
             .copied()
@@ -281,28 +303,28 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
             <p>"No points for "{title}" on the "{axis}" axis. Missing budget counters are not estimated."</p>
         };
     }
-    (low_x, high_x) = chart_domain(low_x, high_x);
+    (low_x, high_x) = chart_x_domain(low_x, high_x);
     (low_y, high_y) = chart_domain(low_y, high_y);
     let span_x = (high_x / 2.0 - low_x / 2.0).max(f64::MIN_POSITIVE);
     let span_y = (high_y / 2.0 - low_y / 2.0).max(f64::MIN_POSITIVE);
     let mut lines = Vec::new();
     for (index, points) in reduced.iter().enumerate() {
-        let (label, _, style) = traces[index];
-        let hash = label.bytes().fold(2166136261u32, |hash, byte| {
-            (hash ^ u32::from(byte)).wrapping_mul(16777619)
-        });
-        // Only this bounded numeric hash supplies the legend's CSS colour.
-        let colour = format!("hsl({},65%,36%)", hash % 360);
+        let (label, _, style, series_index) = traces[index];
+        let colour = series_index % 8;
         let mut path = String::new();
         for (x, y) in points {
             let px = (x / 2.0 - low_x / 2.0) / span_x * 900.0;
             let py = 180.0 - (y / 2.0 - low_y / 2.0) / span_y * 180.0;
             let _ = write!(path, "{px:.2},{py:.2} ");
         }
-        let last = points.last().map(|point| number(point.1)).unwrap_or_else(|| "–".into());
         let samples = serde_json::to_string(points).expect("finite chart points serialize");
-        lines.push((colour, path, label, last, samples, style));
+        lines.push((colour, path, label, samples, style, series_index));
     }
+    let namespace = series
+        .first()
+        .and_then(|line| line.label.find('/').map(|index| &line.label[..=index]))
+        .filter(|prefix| series.iter().all(|line| line.label.starts_with(prefix)))
+        .unwrap_or("");
     let key = encode(&format!(
         "{title}|{}",
         series
@@ -312,24 +334,27 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
             .join("|")
     ));
     let legend = component(|output| {
-        output.each(&lines, |output, (colour, _, label, last, _, style)| {
+        output.each(&lines, |output, (colour, _, label, _, style, series_index)| {
             if *style == TraceStyle::Raw {
                 return Ok(());
             }
-            output.trusted(TrustedHtml("<span"))?;
-            output.attribute("style", &format!("color:{colour}"))?;
-            output.trusted(TrustedHtml(">"))?;
-            output.text(label)?;
-            if let TraceStyle::Smoothed(method) = style {
-                output.text(&format!(" ({method})"))?;
+            let name = chart_label(label.strip_prefix(namespace).unwrap_or(label));
+            let (prefix, suffix) = name.split_once('…').unwrap_or((&name, ""));
+            html! { output,
+                <span data-colour=colour title=label aria-label=label tabindex="0">
+                    <b>{series_index + 1}</b>
+                    <span class="legend-name">
+                        <span class="legend-prefix">{prefix}</span>
+                        <span class="legend-suffix">
+                            {if suffix.is_empty() { String::new() } else { format!("…{suffix}") }}
+                        </span>
+                    </span>
+                </span>
             }
-            output.text(": ")?;
-            output.text(last)?;
-            output.trusted(TrustedHtml("</span>"))
         })
     });
     let paths = component(|output| {
-        output.each(&lines, |output, (colour, path, label, _, samples, style)| {
+        output.each(&lines, |output, (colour, path, label, samples, style, series_index)| {
             let label = match style {
                 TraceStyle::Raw => format!("{label} (raw)"),
                 TraceStyle::Smoothed(method) => format!("{label} ({method})"),
@@ -338,9 +363,13 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
             html! { output,
                 <polyline
                     fill="none"
-                    stroke=colour
-                    stroke-width={if *style == TraceStyle::Raw { "1" } else { "2" }}
-                    stroke-opacity={if *style == TraceStyle::Raw { "0.22" } else { "1" }}
+                    stroke="currentColor"
+                    data-colour=colour
+                    stroke-width={if *style == TraceStyle::Raw { "1" } else { "2.5" }}
+                    stroke-opacity={if *style == TraceStyle::Raw { "0.12" } else { "1" }}
+                    stroke-dasharray={if *series_index < 8 { "none" } else { "5 3" }}
+                    data-series=series_index
+                    data-kind={if *style == TraceStyle::Raw { "raw" } else { "value" }}
                     stroke-linecap="round"
                     stroke-linejoin="round"
                     vector-effect="non-scaling-stroke"
@@ -374,7 +403,7 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
                     y="218"
                     text-anchor={if index == 0 { "start" } else if index == 4 { "end" } else { "middle" }}
                 >
-                    {chart_tick(x)}
+                    {chart_axis_tick(x, low_x, high_x, axis)}
                 </text>
             }?;
         }
@@ -385,7 +414,12 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
             <figcaption>
                 {title}" "
                 <span class="dim">
-                    "· "{chart_y_tick(low_y, low_y, high_y)}" to "{chart_y_tick(high_y, low_y, high_y)}
+                    {series
+                        .iter()
+                        .find_map(|line| {
+                            line.raw.as_ref().map(|(method, _)| format!("· {method} overlay · faint: raw"))
+                        })
+                        .unwrap_or_default()}
                 </span> <span class="dim" data-chart-state></span>
             </figcaption>
             <div class="legend">{legend}</div>
@@ -399,7 +433,7 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
             >
                 {ticks}
                 <text data-axis-label x="510" y="244" text-anchor="middle">
-                    {axis}
+                    {if axis == "time" { "time (UTC)" } else { axis }}
                 </text>
                 <svg
                     class="chart"
@@ -412,6 +446,8 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
                     tabindex="0"
                     aria-label="Chart samples: use left and right arrow keys to inspect"
                     data-axis=axis
+                    data-y-low=low_y
+                    data-y-high=high_y
                     data-low=low_x
                     data-high=high_x
                 >
@@ -444,18 +480,144 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
                 </button>
             </div>
             <output aria-live="off"></output>
+            <div
+                class="table-scroll chart-readout"
+                role="region"
+                aria-label="Chart sample values"
+                tabindex="0"
+                hidden
+            >
+                <table>
+                    <thead>
+                        <tr>
+                            <th>"Series"</th>
+                            <th>{axis}</th>
+                            <th>
+                                {series
+                                    .iter()
+                                    .find_map(|line| line.raw.as_ref().map(|(method, _)| *method))
+                                    .unwrap_or("Value")}
+                            </th>
+                            {|output| {
+                                if series.iter().any(|line| line.raw.is_some()) {
+                                    html! { output, <th>"Raw"</th> }
+                                } else {
+                                    Ok(())
+                                }
+                            }}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {|output| {
+                            output
+                                .each(
+                                    &lines,
+                                    |output, (colour, _, label, _, style, series_index)| {
+                                        if *style == TraceStyle::Raw {
+                                            return Ok(());
+                                        }
+                                        html! { output,
+                                            <tr data-series=series_index>
+                                                <td>
+                                                    <details class="series-name">
+                                                        <summary data-colour=colour aria-label=label>
+                                                            {series_index + 1}
+                                                            <span class="series-short">
+                                                                " · "
+                                                                {chart_label(
+                                                                    label.strip_prefix(namespace).unwrap_or(label),
+                                                                )}
+                                                            </span>
+                                                        </summary>
+                                                        <span data-series-full>{label}</span>
+                                                    </details>
+                                                </td>
+                                                <td data-sample-x>"—"</td>
+                                                <td data-sample-value>"—"</td>
+                                                {|output| {
+                                                    if series.iter().any(|line| line.raw.is_some()) {
+                                                        html! { output,
+                                                            <td>
+                                                                <span data-sample-raw>"—"</span>
+                                                                <small data-sample-raw-x></small>
+                                                            </td>
+                                                        }
+                                                    } else {
+                                                        Ok(())
+                                                    }
+                                                }}
+                                            </tr>
+                                        }
+                                    },
+                                )
+                        }}
+                    </tbody>
+                </table>
+            </div>
         </figure>
     }
 }
 
-fn chart_tick(value: f64) -> String {
-    if value == 0.0 || (0.001..1e12).contains(&value.abs()) {
-        let rounded = format!("{value:.11e}")
-            .parse::<f64>()
-            .expect("bounded finite chart tick");
-        return rounded.to_string();
+fn chart_label(label: &str) -> String {
+    let name = label;
+    let characters: Vec<char> = name.chars().collect();
+    if characters.len() <= 32 {
+        return name.to_string();
     }
-    format!("{value:.5e}")
+    format!(
+        "{}…{}",
+        characters[..12].iter().collect::<String>(),
+        characters[characters.len() - 19..].iter().collect::<String>()
+    )
+}
+
+fn chart_axis_tick(value: f64, low: f64, high: f64, axis: &str) -> String {
+    if axis == "time" {
+        if let Ok(date) = time::OffsetDateTime::from_unix_timestamp(value.floor() as i64) {
+            if high / 2.0 - low / 2.0 < 30.0 {
+                return format!(
+                    "{:02}:{:02}:{:02}.{:03}",
+                    date.hour(),
+                    date.minute(),
+                    date.second(),
+                    ((value - value.floor()) * 1000.0).floor() as u16
+                );
+            }
+            if high / 2.0 - low / 2.0 < 43200.0 {
+                return format!("{:02}:{:02}:{:02}", date.hour(), date.minute(), date.second());
+            }
+            return format!(
+                "{:02}-{:02} {:02}:{:02}",
+                date.month() as u8,
+                date.day(),
+                date.hour(),
+                date.minute()
+            );
+        }
+    }
+    chart_y_tick(value, low, high)
+}
+
+fn chart_x_domain(low: f64, high: f64) -> (f64, f64) {
+    let (low, high) = chart_domain(low, high);
+    let quarter = high / 4.0 - low / 4.0;
+    let power = 10.0_f64.powf(quarter.log10().floor());
+    if !power.is_finite() || power == 0.0 {
+        return (low, high);
+    }
+    let fraction = quarter / power;
+    let step = [1.0, 2.0, 2.5, 5.0, 10.0]
+        .into_iter()
+        .find(|step| *step >= fraction)
+        .unwrap_or(10.0)
+        * power;
+    let lower = (low / step).floor() * step;
+    let upper = (high / step).ceil() * step;
+    if lower.is_finite() && upper.is_finite() && lower < upper {
+        (lower.min(low), upper.max(high))
+    } else {
+        (low, high)
+    }
 }
 
 fn chart_y_tick(value: f64, low: f64, high: f64) -> String {
@@ -464,12 +626,34 @@ fn chart_y_tick(value: f64, low: f64, high: f64) -> String {
     }
     let magnitude = low.abs().max(high.abs());
     let step = high / 8.0 - low / 8.0;
-    let digits = ((magnitude.log10() - step.log10()).ceil() + 1.0).clamp(3.0, 12.0) as usize;
-    let scientific = format!("{value:.precision$e}", precision = digits - 1);
-    if (0.001..10000.0).contains(&value.abs()) {
-        return scientific.parse::<f64>().expect("finite chart tick").to_string();
+    let digits = if step > 0.0 {
+        ((magnitude.log10() - step.log10()).ceil() + 1.0).clamp(3.0, 12.0) as usize
+    } else {
+        5
+    };
+    let (scale, suffix) = if magnitude < 1e27 {
+        [
+            (1e24, "Y"),
+            (1e21, "Z"),
+            (1e18, "E"),
+            (1e15, "P"),
+            (1e12, "T"),
+            (1e9, "B"),
+            (1e6, "M"),
+            (1e3, "K"),
+        ]
+        .into_iter()
+        .find(|(scale, _)| magnitude >= *scale)
+        .unwrap_or((1.0, ""))
+    } else {
+        (1.0, "")
+    };
+    let scaled = value / scale;
+    let scientific = format!("{scaled:.precision$e}", precision = digits - 1);
+    if (0.001..10000.0).contains(&scaled.abs()) {
+        return format!("{}{suffix}", scientific.parse::<f64>().expect("finite chart tick"));
     }
-    scientific
+    format!("{scientific}{suffix}")
 }
 
 fn chart_domain(low: f64, high: f64) -> (f64, f64) {
@@ -514,6 +698,7 @@ const chart_observer = new ResizeObserver(entries => {
             tick.setAttribute("x", left + Number(tick.dataset.xTick) * plot_width);
         });
         target.querySelector("[data-axis-label]").setAttribute("x", left + plot_width / 2);
+        show_ticks(target.querySelector("svg.chart"));
     });
 });
 
@@ -527,8 +712,45 @@ function chart_samples(line) {
     return sample_cache.get(line);
 }
 
-function chart_number(value) {
-    return Number(value).toLocaleString(undefined, {maximumSignificantDigits: 12});
+function chart_number(value, low = value, high = value, minimum = 3) {
+    if (value === 0) return "0";
+    const magnitude = Math.max(Math.abs(low), Math.abs(high));
+    const step = high / 8 - low / 8;
+    const digits = step > 0 ? Math.max(minimum, Math.min(12, Math.ceil(Math.log10(magnitude) - Math.log10(step)) + 1)) : 5;
+    const unit = magnitude < 1e27 && [[1e24,"Y"],[1e21,"Z"],[1e18,"E"],[1e15,"P"],[1e12,"T"],[1e9,"B"],[1e6,"M"],[1e3,"K"]].find(([scale]) => magnitude >= scale);
+    const [scale, suffix] = unit || [1, ""];
+    const scaled = value / scale;
+    return (Math.abs(scaled) >= 0.001 && Math.abs(scaled) < 10000 ?
+        Number(scaled.toPrecision(digits)).toString() : scaled.toExponential(digits - 1)) + suffix;
+}
+
+function chart_axis_number(value, low, high, axis) {
+    if (axis === "time" && value > -62167219200 && value < 253402300800) {
+        const date = new Date(value * 1000).toISOString();
+        if (low === high) return date.slice(0, 23).replace("T", " ") + " UTC";
+        return high / 2 - low / 2 < 43200 ? date.slice(11, high - low < 60 ? 23 : 19) : date.slice(5, 16).replace("T", " ");
+    }
+    return chart_number(value, low, high);
+}
+
+function show_ticks(svg) {
+    const box = svg.viewBox.baseVal;
+    const low = range_value(svg, box.x / 900);
+    const high = range_value(svg, (box.x + box.width) / 900);
+    const ticks = Array.from(svg.closest("figure").querySelectorAll("[data-x-tick]"));
+    ticks.forEach(tick => {
+        tick.textContent = chart_axis_number(range_value(svg, (box.x + box.width * Number(tick.dataset.xTick)) / 900), low, high, svg.dataset.axis);
+        tick.setAttribute("visibility", "visible");
+    });
+    const shown = ticks.filter(tick => getComputedStyle(tick).display !== "none");
+    const last = shown.at(-1)?.getBoundingClientRect();
+    let right = -Infinity;
+    shown.forEach((tick, index) => {
+        const bounds = tick.getBoundingClientRect();
+        const overlaps = bounds.left < right + 8 || (index < shown.length - 1 && bounds.right > last.left - 8);
+        if (overlaps && index < shown.length - 1) tick.setAttribute("visibility", "hidden");
+        else right = bounds.right;
+    });
 }
 
 function range_value(svg, fraction) {
@@ -565,21 +787,45 @@ document.addEventListener("pointerdown", event => {
 });
 
 function inspect_chart(svg, x) {
-    const values = [];
+    x = Math.max(0, Math.min(900, x));
+    const values = new Map();
     svg.querySelectorAll("polyline").forEach(line => {
-        if (!line.points.numberOfItems) return;
+        const count = line.points.numberOfItems;
+        if (!count || x < line.points.getItem(0).x - 1e-6 || x > line.points.getItem(count - 1).x + 1e-6) return;
         let nearest = 0;
-        for (let index = 1; index < line.points.numberOfItems; index++) {
+        for (let index = 1; index < count; index++) {
             if (Math.abs(line.points.getItem(index).x - x) < Math.abs(line.points.getItem(nearest).x - x)) nearest = index;
         }
-        const point = chart_samples(line)[nearest];
-        values.push(line.dataset.label + ": " + chart_number(point[1]) + " at " + svg.dataset.axis + " " + chart_number(point[0]));
+        if (!values.has(line.dataset.series)) values.set(line.dataset.series, {});
+        values.get(line.dataset.series)[line.dataset.kind] = chart_samples(line)[nearest];
+    });
+    const figure = svg.closest("figure");
+    const readout = figure.querySelector(".chart-readout");
+    readout.hidden = !values.size;
+    readout.querySelectorAll("tbody tr").forEach(row => {
+        const {value, raw} = values.get(row.dataset.series) || {};
+        const axis = row.querySelector("[data-sample-x]");
+        axis.textContent = value ? chart_axis_number(value[0], value[0], value[0], svg.dataset.axis) : "No sample";
+        axis.title = value ? String(value[0]) : "";
+        const cell = row.querySelector("[data-sample-value]");
+        cell.textContent = value ? chart_number(value[1], Number(svg.dataset.yLow), Number(svg.dataset.yHigh), 4) : "—";
+        cell.title = value ? String(value[1]) : "";
+        const raw_cell = row.querySelector("[data-sample-raw]");
+        if (raw_cell) {
+            raw_cell.textContent = raw ? chart_number(raw[1], Number(svg.dataset.yLow), Number(svg.dataset.yHigh), 4) : "—";
+            raw_cell.title = raw ? String(raw[1]) : "";
+            const raw_x = row.querySelector("[data-sample-raw-x]");
+            raw_x.textContent = raw && (!value || raw[0] !== value[0]) ? "at " + chart_axis_number(raw[0], raw[0], raw[0], svg.dataset.axis) : "";
+            raw_x.title = raw ? String(raw[0]) : "";
+        }
     });
     const cursor = svg.querySelector("[data-cursor]");
     cursor.setAttribute("x1", x);
     cursor.setAttribute("x2", x);
     cursor.setAttribute("visibility", "visible");
-    svg.closest("figure").querySelector("output").textContent = values.join(" · ");
+    const target = range_value(svg, x / 900);
+    figure.querySelector("output").textContent = (values.size ? "Nearest samples · " : "No samples · ") +
+        svg.dataset.axis + " " + chart_axis_number(target, target, target, svg.dataset.axis);
 }
 
 document.addEventListener("pointermove", event => {
@@ -599,17 +845,18 @@ document.addEventListener("pointermove", event => {
 
 document.addEventListener("keydown", event => {
     const svg = event.target.closest("svg.chart");
-    if (!svg || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    const line = svg.querySelector("polyline");
-    if (!line || !line.points.numberOfItems) return;
+    if (!svg || !["ArrowLeft", "ArrowRight", "Home", "End", "Escape"].includes(event.key)) return;
+    if (event.key === "Escape") { event.preventDefault(); show_range(svg); return; }
+    const positions = [...new Set(Array.from(svg.querySelectorAll("polyline")).flatMap(line => Array.from(line.points, point => point.x)))].sort((a, b) => a - b);
+    if (!positions.length) return;
     event.preventDefault();
-    const last = line.points.numberOfItems - 1;
+    const last = positions.length - 1;
     let index = Number(svg.dataset.sampleIndex || 0);
     if (event.key === "Home") index = 0;
     else if (event.key === "End") index = last;
     else index = Math.max(0, Math.min(last, index + (event.key === "ArrowRight" ? 1 : -1)));
     svg.dataset.sampleIndex = index;
-    const x = line.points.getItem(index).x;
+    const x = positions[index];
     const box = svg.viewBox.baseVal;
     if (x < box.x) box.x = x;
     else if (x > box.x + box.width) box.x = x - box.width;
@@ -634,9 +881,9 @@ function show_range(svg) {
     const box = svg.viewBox.baseVal;
     const figure = svg.closest("figure");
     figure.querySelector("[data-chart-state]").textContent = svg.dataset.zoomed ? " · paused while zoomed" : "";
-    figure.querySelectorAll("[data-x-tick]").forEach(tick => {
-        tick.textContent = chart_number(range_value(svg, (box.x + box.width * Number(tick.dataset.xTick)) / 900));
-    });
+    show_ticks(svg);
+    figure.querySelector(".chart-readout").hidden = true;
+    svg.querySelector("[data-cursor]").setAttribute("visibility", "hidden");
     figure.querySelector("output").textContent = "Visible " + svg.dataset.axis + ": " +
         chart_number(range_value(svg, box.x / 900)) + " to " +
         chart_number(range_value(svg, (box.x + box.width) / 900)) +
@@ -964,7 +1211,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(page.matches("<polyline").count(), 2);
-        assert!(page.contains("stroke-opacity=\"0.22\""));
+        assert!(page.contains("stroke-opacity=\"0.12\""));
         assert!(page.contains("&lt;run&gt; (raw)"));
         assert!(page.contains("&lt;run&gt; (EMA)"));
         assert!(!page.contains("NaN"));
@@ -983,8 +1230,18 @@ mod tests {
             assert!(low <= value);
             assert!(value <= high);
         }
-        assert_ne!(chart_tick(1_000_001.0), chart_tick(1_000_002.0));
+        assert_ne!(
+            chart_axis_tick(1_000_001.0, 1e6, 1_000_003.0, "step"),
+            chart_axis_tick(1_000_002.0, 1e6, 1_000_003.0, "step")
+        );
         assert_eq!(chart_y_tick(0.402583066712, 0.4, 1.4), "0.403");
+        assert_eq!(chart_x_domain(185474.0, 18525323.0), (0.0, 20000000.0));
+        assert_eq!(chart_axis_tick(5000000.0, 0.0, 20000000.0, "tokens seen"), "5M");
+        assert_eq!(chart_y_tick(12000.0, 0.0, 20000.0), "12K");
+        assert_eq!(
+            chart_label("abcdefghijklmnopqrstuvwxyz-0123456789-abcdefghij"),
+            "abcdefghijkl…23456789-abcdefghij"
+        );
         assert_ne!(
             chart_y_tick(1.00000001, 1.0, 1.0000001),
             chart_y_tick(1.00000002, 1.0, 1.0000001)
@@ -1017,7 +1274,10 @@ mod tests {
         let points: Vec<&str> = path.split_whitespace().collect();
         assert!(points.len() <= 1004);
         assert!(points.first().unwrap().starts_with("0.00,"));
-        assert!(points.last().unwrap().starts_with("900.00,"));
+        let samples: Vec<(f64, f64)> =
+            serde_json::from_str(page.split("data-samples=\"").nth(1).unwrap().split('"').next().unwrap()).unwrap();
+        assert_eq!(samples.first().unwrap().0, 0.0);
+        assert_eq!(samples.last().unwrap().0, 19999.0);
         assert!(points.iter().any(|point| point.ends_with(",0.00")));
     }
 }

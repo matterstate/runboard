@@ -152,18 +152,28 @@ the plots.
 
 Loss charts default to **tokens seen** when every selected run has token
 history, with raw loss faded underneath a centered **Gaussian** overlay. Its
-bandwidth (standard deviation) defaults to 1% of each run's full retained axis
-range, measured in tokens/FLOPs rather than observation count. Adjust it from
-0.5% to 10%; smaller values follow changes more closely. The bounded 1024-bin
-approximation uses a kernel truncated at four standard deviations. Both sides of
-a point contribute, so new data can revise the curve; its relative bandwidth
-grows with the run's axis range too. Other metrics default to steps and raw
-values. Under **Smoothing, range and seed groups**, choose Auto, Gaussian, Raw,
-trailing mean or EMA. Mean and EMA use a span from 1 to 100 reported
-observations. EMA uses `alpha = 2 / (span + 1)`, seeded from the first
-observation; its span is not token-weighted. Span 1 shows raw values. Smoothing
-precedes visible-range filtering and changes neither table summaries nor saved
-training data.
+bandwidth (standard deviation) defaults to 2% of the selected runs' shared full
+retained axis range, measured in tokens/FLOPs rather than observation count.
+Every run in a comparison uses the same axis-distance bandwidth, including
+shorter runs. Adjust it from 0.5% to 10%; smaller values follow changes more
+closely. The bounded 1024-bin approximation uses a kernel truncated at four
+standard deviations. Both sides of a point contribute, so new data can revise
+the curve; its relative bandwidth grows with the shared axis range too. Other
+metrics default to steps and raw values. Under **Smoothing, range and seed
+groups**, choose Auto, Gaussian, Raw, trailing mean or EMA. Mean and EMA use a
+span from 1 to 100 reported observations. EMA uses `alpha = 2 / (span + 1)`,
+seeded from the first observation; its span is not token-weighted. Span 1 shows
+raw values. Smoothing precedes visible-range filtering and changes neither table
+summaries nor saved training data.
+
+All charts use compact axis ticks (K/M/B and scientific notation where needed)
+and numbered, shortened series labels. Full names remain available in the legend
+and expandable inspection rows. Hover, tap, or use arrow keys for a sample
+table; Escape dismisses it. Values are rounded for reading, with full precision
+in cell titles. Runs outside the inspected range show no sample rather than
+extending their last value. Raw sample positions are shown separately if
+decimation selects a different position from the smoothed sample. Time axes use
+UTC.
 
 The **tokens** axis uses cumulative `train/tokens_seen` when reported; otherwise
 it sums `train/real_tokens` reporting windows along the retained checkpoint

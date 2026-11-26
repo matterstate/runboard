@@ -1135,14 +1135,14 @@ fn controls(
                         <input type="checkbox" name="group" value="1" checked=(query.get("group") == "1") />
                     </label>
                     <label>
-                        "Gaussian bandwidth (% of run axis range) "
+                        "Gaussian bandwidth (% of shared axis range) "
                         <input
                             type="number"
                             name="bandwidth"
                             min="0.5"
                             max="10"
                             step="0.1"
-                            value={query.get("bandwidth").parse::<f64>().unwrap_or(1.0)}
+                            value={query.get("bandwidth").parse::<f64>().unwrap_or(2.0)}
                         />
                     </label>
                     <label>
@@ -1151,7 +1151,7 @@ fn controls(
                     <label>"To "<input type="number" step="any" name="end" value=query.get("end") /></label>
                 </fieldset>
                 <p class="dim">
-                    "Auto shows loss against tokens seen when all runs have token history, with raw loss under a centered Gaussian overlay; other metrics use steps and raw values. Gaussian bandwidth is its standard deviation in axis distance (default 1% of each run's full retained axis range), not observation count. Both sides contribute; new data can revise the curve, and its relative bandwidth grows with the run's axis range. EMA uses alpha = 2 / (span + 1), seeded from the first observation; span 1 is raw. Tokens sums reported train/real_tokens windows only with complete history, or uses cumulative train/tokens_seen. FLOPs requires cumulative train/flops_total; it is not estimated. Table summaries are unchanged."
+                    "Auto shows loss against tokens seen when all runs have token history, with raw loss under a centered Gaussian overlay; other metrics use steps and raw values. Gaussian bandwidth is its standard deviation in axis distance (default 2% of the selected runs' shared full retained axis range), not observation count. Both sides contribute; new data can revise the curve, and its relative bandwidth grows with the shared axis range. EMA uses alpha = 2 / (span + 1), seeded from the first observation; span 1 is raw. Tokens sums reported train/real_tokens windows only with complete history, or uses cumulative train/tokens_seen. FLOPs requires cumulative train/flops_total; it is not estimated. Table summaries are unchanged."
                 </p>
             </details>
             <p class="dim">
@@ -1246,10 +1246,29 @@ fn smoothing(query: &Query, metric: &str) -> Smoothing {
     Smoothing::parse(value, data::metric_order(metric).0).expect("validated smoothing method")
 }
 
-fn training_series(label: String, log: &[Record], metric: &str, query: &Query, axis: Axis) -> Series {
-    let method = smoothing(query, metric);
+fn training_range(logs: &[Vec<Record>], metric: &str, axis: Axis) -> Option<(f64, f64)> {
+    logs.iter()
+        .flat_map(|log| curve(log, metric, &Query(Vec::new()), axis, Smoothing::Raw))
+        .filter(|(x, _)| x.is_finite())
+        .fold(None, |range, (x, _)| {
+            Some(range.map_or((x, x), |(low, high): (f64, f64)| (low.min(x), high.max(x))))
+        })
+}
+
+fn training_series(
+    label: String,
+    log: &[Record],
+    metric: &str,
+    query: &Query,
+    axis: Axis,
+    range: Option<(f64, f64)>,
+) -> Series {
+    let method = match smoothing(query, metric) {
+        Smoothing::Gaussian(_) => Smoothing::Gaussian(range),
+        method => method,
+    };
     let overlay = match method {
-        Smoothing::Gaussian => Some("Gaussian"),
+        Smoothing::Gaussian(_) => Some("Gaussian"),
         Smoothing::ExponentialMovingAverage if query.get("smooth").parse::<u32>().unwrap_or(20) > 1 => Some("EMA"),
         _ => None,
     };
@@ -1279,14 +1298,19 @@ fn training_chart(output: &mut Output, metric: &str, axis: Axis, series: &[Serie
 
 // Linear binning bounds the work independently of reporting density. The kernel
 // uses axis distance, is centered, and truncates at four standard deviations.
-fn gaussian_curve(points: &[(f64, f64)], bandwidth: f64) -> Vec<(f64, f64)> {
+fn gaussian_curve(points: &[(f64, f64)], bandwidth: f64, range: Option<(f64, f64)>) -> Vec<(f64, f64)> {
     const BINS: usize = 1024;
     debug_assert!(bandwidth.is_finite() && (0.005..=0.1).contains(&bandwidth));
     if points.is_empty() {
         return Vec::new();
     }
-    let low = points.iter().map(|point| point.0).fold(f64::INFINITY, f64::min);
-    let high = points.iter().map(|point| point.0).fold(f64::NEG_INFINITY, f64::max);
+    let (low, high) = range.unwrap_or_else(|| {
+        (
+            points.iter().map(|point| point.0).fold(f64::INFINITY, f64::min),
+            points.iter().map(|point| point.0).fold(f64::NEG_INFINITY, f64::max),
+        )
+    });
+    debug_assert!(low.is_finite() && high.is_finite() && low <= high);
     let span = high / 2.0 - low / 2.0;
     let scale = points.iter().map(|point| point.1.abs()).fold(0.0, f64::max);
     let low_y = points.iter().map(|point| point.1).fold(f64::INFINITY, f64::min);
@@ -1358,7 +1382,7 @@ fn curve(records: &[Record], metric: &str, query: &Query, axis: Axis, smoothing:
         }
         let Some(y) = record.get(metric) else { continue };
         let y = match smoothing {
-            Smoothing::Raw | Smoothing::Gaussian => y,
+            Smoothing::Raw | Smoothing::Gaussian(_) => y,
             Smoothing::Mean => {
                 history.push_back(y);
                 if history.len() > window {
@@ -1378,17 +1402,17 @@ fn curve(records: &[Record], metric: &str, query: &Query, axis: Axis, smoothing:
             points.push((x, y));
         }
     }
-    if smoothing == Smoothing::Gaussian {
-        let bandwidth = query.get("bandwidth").parse::<f64>().unwrap_or(1.0) / 100.0;
-        points = gaussian_curve(&points, bandwidth);
+    if let Smoothing::Gaussian(range) = smoothing {
+        let bandwidth = query.get("bandwidth").parse::<f64>().unwrap_or(2.0) / 100.0;
+        points = gaussian_curve(&points, bandwidth, range);
     }
     points.retain(|(x, _)| *x >= start && *x <= end);
     points
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 enum Smoothing {
-    Gaussian,
+    Gaussian(Option<(f64, f64)>),
     Raw,
     Mean,
     ExponentialMovingAverage,
@@ -1398,11 +1422,11 @@ impl Smoothing {
     fn parse(value: &str, kind: data::MetricKind) -> Option<Self> {
         match value {
             "" | "auto" => Some(if kind == data::MetricKind::Loss {
-                Self::Gaussian
+                Self::Gaussian(None)
             } else {
                 Self::Raw
             }),
-            "gaussian" => Some(Self::Gaussian),
+            "gaussian" => Some(Self::Gaussian(None)),
             "raw" => Some(Self::Raw),
             "mean" => Some(Self::Mean),
             "ema" => Some(Self::ExponentialMovingAverage),
@@ -1968,10 +1992,14 @@ fn comparison(selected: &[Entry<'_>], query: &Query, offline: bool) -> RenderRes
             }
             for metric in page.names {
                 let axis = axis(query, &metric, &logs);
+                let range = match smoothing(query, &metric) {
+                    Smoothing::Gaussian(_) => training_range(&logs, &metric, axis),
+                    _ => None,
+                };
                 let series: Vec<Series> = selected
                     .iter()
                     .zip(&logs)
-                    .map(|(entry, log)| training_series(entry.id(), log, &metric, query, axis))
+                    .map(|(entry, log)| training_series(entry.id(), log, &metric, query, axis, range))
                     .collect();
                 training_chart(output, &metric, axis, &series)?;
                 if query.get("group") == "1" {
@@ -2268,7 +2296,7 @@ fn run_page(settings: &Settings, entry: &Entry<'_>, query: &Query) -> RenderResu
                     output,
                     metric,
                     axis,
-                    &[training_series(entry.id(), &log, metric, query, axis)],
+                    &[training_series(entry.id(), &log, metric, query, axis, None)],
                 )?;
             }
             if !log.is_empty() {
@@ -3539,13 +3567,20 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
                 .extend([(data::TOKENS_AXIS.into(), tokens), ("train/flops_total".into(), flops)]);
         }
         let query = Query::parse("smoothing=ema&smooth=3").unwrap();
-        let series = training_series("run".into(), &budgets, "loss", &query, Axis::Tokens);
+        let series = training_series("run".into(), &budgets, "loss", &query, Axis::Tokens, None);
         assert_eq!(series.raw.unwrap().1, [(1000.0, 4.0), (3000.0, 2.0)]);
         assert_eq!(series.points, [(1000.0, 4.0), (3000.0, 3.0)]);
-        let series = training_series("run".into(), &budgets, "loss", &query, Axis::FloatingPointOperations);
+        let series = training_series(
+            "run".into(),
+            &budgets,
+            "loss",
+            &query,
+            Axis::FloatingPointOperations,
+            None,
+        );
         assert_eq!(series.points, [(1e12, 4.0), (3e12, 3.0)]);
         budgets[0].0.retain(|(key, _)| key != data::TOKENS_AXIS);
-        let series = training_series("run".into(), &budgets, "loss", &query, Axis::Tokens);
+        let series = training_series("run".into(), &budgets, "loss", &query, Axis::Tokens, None);
         assert_eq!(series.points, [(3000.0, 3.0)]);
         budgets[1]
             .0
@@ -3572,7 +3607,7 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
                 (x, if index == 50 { 10.0 } else { 1.0 })
             })
             .collect();
-        let smoothed = gaussian_curve(&points, 0.05);
+        let smoothed = gaussian_curve(&points, 0.05, None);
         for (index, &(x, y)) in smoothed.iter().enumerate() {
             let mut numerator = 0.0;
             let mut denominator = 0.0;
@@ -3589,7 +3624,7 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
         assert!(smoothed[50].1 > smoothed[51].1);
         for value in [0.0, 1.0, -1.0, f64::MAX, -f64::MAX] {
             assert_eq!(
-                gaussian_curve(&[(0.0, value), (1.0, value)], 0.01),
+                gaussian_curve(&[(0.0, value), (1.0, value)], 0.01, None),
                 [(0.0, value), (1.0, value)]
             );
         }
@@ -3603,6 +3638,7 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
             "loss",
             &Query::parse("smoothing=gaussian&bandwidth=5").unwrap(),
             Axis::Step,
+            None,
         );
         let cropped = training_series(
             "run".into(),
@@ -3610,8 +3646,33 @@ with runboard.init(project="resume", name="branch", resume_from=1) as run:
             "loss",
             &Query::parse("smoothing=gaussian&bandwidth=5&start=1600&end=3400").unwrap(),
             Axis::Step,
+            None,
         );
         assert_eq!(cropped.points, full.points[40..=60]);
+        let logs = vec![
+            vec![
+                Record(vec![("step".into(), 0.0), ("loss".into(), 1.0)]),
+                Record(vec![("step".into(), 100.0), ("loss".into(), 5.0)]),
+                Record(vec![("step".into(), 200.0), ("loss".into(), 1.0)]),
+            ],
+            vec![Record(vec![("step".into(), 10000.0), ("loss".into(), 1.0)])],
+        ];
+        let range = training_range(&logs, "loss", Axis::Step);
+        assert_eq!(range, Some((0.0, 10000.0)));
+        let shared = training_series("short".into(), &logs[0], "loss", &Query(Vec::new()), Axis::Step, range);
+        let weight = (-0.5_f64 * (100.0_f64 / 200.0).powi(2)).exp();
+        let expected = (5.0 + 2.0 * weight) / (1.0 + 2.0 * weight);
+        assert!((shared.points[1].1 - expected).abs() < 0.002);
+        assert!(shared.points[1].1 < 3.0);
+        let cropped = training_series(
+            "short".into(),
+            &logs[0],
+            "loss",
+            &Query::parse("start=100").unwrap(),
+            Axis::Step,
+            range,
+        );
+        assert_eq!(cropped.points, shared.points[1..]);
     }
 
     #[test]
