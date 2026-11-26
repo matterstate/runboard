@@ -168,12 +168,11 @@ summaries nor saved training data.
 
 All charts use compact axis ticks (K/M/B and scientific notation where needed)
 and numbered, shortened series labels. Full names remain available in the legend
-and expandable inspection rows. Hover, tap, or use arrow keys for a sample
-table; Escape dismisses it. Values are rounded for reading, with full precision
-in cell titles. Runs outside the inspected range show no sample rather than
-extending their last value. Raw sample positions are shown separately if
-decimation selects a different position from the smoothed sample. Time axes use
-UTC.
+and inspection cell titles. Hover, tap, or use arrow keys for a sample table;
+Escape dismisses it. Values are rounded for reading, with full precision in cell
+titles. Runs outside the inspected range show no sample rather than extending
+their last value. Raw sample positions are shown separately if decimation
+selects a different position from the smoothed sample. Time axes use UTC.
 
 The **tokens** axis uses cumulative `train/tokens_seen` when reported; otherwise
 it sums `train/real_tokens` reporting windows along the retained checkpoint

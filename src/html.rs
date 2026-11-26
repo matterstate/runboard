@@ -190,10 +190,9 @@ figure [data-colour="6"] { color: #333333; }
 figure [data-colour="7"] { color: #5b6678; }
 .chart-readout { margin-top: .5rem; max-height: 22rem; }
 .chart-readout table { margin: 0; font-variant-numeric: tabular-nums; }
-.chart-readout td { padding: .35rem .5rem; }
-.chart-readout .series-name { min-width: 8rem; max-width: 20rem; margin: 0; }
-.series-name summary { overflow-wrap: anywhere; }
-.series-name > span { display: block; overflow-wrap: anywhere; color: #263445; }
+.chart-readout th, .chart-readout td { padding: .35rem .5rem; }
+.chart-readout th:not(:first-child), .chart-readout td:not(:first-child) { text-align: right; }
+.chart-readout .series-name { min-width: 8rem; max-width: 20rem; overflow-wrap: anywhere; }
 .chart-readout small { display: block; white-space: nowrap; color: #526070; }
 .plot { display: block; width: 100%; height: 252px; background: #f5f7fa; }
 .plot text { font: 12px system-ui,sans-serif; fill: #526070; }
@@ -518,19 +517,19 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
                                         }
                                         html! { output,
                                             <tr data-series=series_index>
-                                                <td>
-                                                    <details class="series-name">
-                                                        <summary data-colour=colour aria-label=label>
-                                                            {series_index + 1}
-                                                            <span class="series-short">
-                                                                " · "
-                                                                {chart_label(
-                                                                    label.strip_prefix(namespace).unwrap_or(label),
-                                                                )}
-                                                            </span>
-                                                        </summary>
-                                                        <span data-series-full>{label}</span>
-                                                    </details>
+                                                <td
+                                                    class="series-name"
+                                                    data-colour=colour
+                                                    title=label
+                                                    aria-label=label
+                                                >
+                                                    {series_index + 1}
+                                                    <span class="series-short">
+                                                        " · "
+                                                        {chart_label(
+                                                            label.strip_prefix(namespace).unwrap_or(label),
+                                                        )}
+                                                    </span>
                                                 </td>
                                                 <td data-sample-x>"—"</td>
                                                 <td data-sample-value>"—"</td>

@@ -287,10 +287,10 @@ def readability(page: Page, address: str) -> None:
     expect(
         readout.locator("tbody tr").first.locator("[data-sample-value]")
     ).not_to_have_text("—")
-    readout.locator("summary").first.click()
-    expect(
-        readout.locator(".series-name").first.locator("[data-series-full]")
-    ).to_have_text("demo/" + COMPARISON_NAMES[0])
+    expect(readout.locator("details")).to_have_count(0)
+    expect(readout.locator("td.series-name").first).to_have_attribute(
+        "title", "demo/" + COMPARISON_NAMES[0]
+    )
     assert (
         figure.locator('polyline[data-kind="raw"]').first.get_attribute(
             "stroke-opacity"
@@ -320,6 +320,23 @@ def readability(page: Page, address: str) -> None:
         assert figure.locator(".legend").evaluate(
             "node => node.scrollWidth <= node.clientWidth"
         )
+        assert readout.locator("table").evaluate("""table => {
+            const edge = node => {
+                const range = document.createRange();
+                range.selectNodeContents(node);
+                return range.getBoundingClientRect();
+            };
+            const headers = Array.from(table.querySelectorAll("thead th"));
+            return Array.from(table.querySelectorAll("tbody tr")).every(row =>
+                Array.from(row.cells).every((cell, index) => {
+                    const value = cell.querySelector("[data-sample-raw]") || cell;
+                    const header = edge(headers[index]);
+                    const body = edge(value);
+                    return Math.abs(index ? header.right - body.right :
+                        header.left - body.left) < 1;
+                })
+            );
+        }""")
         ticks = figure.locator("[data-x-tick]").all_text_contents()
         assert all(len(tick) < 10 for tick in ticks), ticks
         bounds = figure.locator("[data-x-tick]").evaluate_all(
@@ -713,7 +730,10 @@ def main() -> None:
                         touch.locator("svg.chart").last.tap()
                         expect(
                             touch.locator("figure .chart-readout").last
-                        ).to_contain_text("demo/example")
+                        ).to_be_visible()
+                        expect(
+                            touch.locator("figure .chart-readout td.series-name").last
+                        ).to_have_attribute("title", "demo/example")
                     finally:
                         browser.close()
             finally:
