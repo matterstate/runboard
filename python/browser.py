@@ -267,6 +267,9 @@ def readability(page: Page, address: str) -> None:
     )
     figure = page.locator("figure").first
     expect(figure.locator(".legend > span")).to_have_count(6)
+    expect(figure.locator(".chart-readout")).to_be_visible()
+    expect(figure.locator(".chart-readout tbody tr")).to_have_count(6)
+    expect(figure.locator("[data-sample-value]").first).to_have_text("—")
     for item in figure.locator(".legend > span").all():
         assert item.get_attribute("title").startswith("demo/")
         assert len(item.locator(".legend-name").inner_text()) <= 42
@@ -351,7 +354,11 @@ def readability(page: Page, address: str) -> None:
         assert all(left[1] + 4 <= right[0] for left, right in zip(bounds, bounds[1:]))
     chart.focus()
     chart.press("Escape")
-    expect(readout).to_be_hidden()
+    expect(readout).to_be_visible()
+    figure.get_by_role("button", name="Zoom in", exact=True).click()
+    expect(readout).to_be_visible()
+    figure.get_by_role("button", name="Reset zoom").click()
+    expect(readout).to_be_visible()
     for path in [
         "/run?run=demo/example&metric=accuracy",
         "/run?run=demo/" + COMPARISON_NAMES[1] + "&axis=time&metric=loss",

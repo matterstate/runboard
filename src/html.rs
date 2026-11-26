@@ -484,7 +484,6 @@ pub fn chart(output: &mut rstml_ssr::Output, title: &str, axis: &str, series: &[
                 role="region"
                 aria-label="Chart sample values"
                 tabindex="0"
-                hidden
             >
                 <table>
                     <thead>
@@ -800,7 +799,6 @@ function inspect_chart(svg, x) {
     });
     const figure = svg.closest("figure");
     const readout = figure.querySelector(".chart-readout");
-    readout.hidden = !values.size;
     readout.querySelectorAll("tbody tr").forEach(row => {
         const {value, raw} = values.get(row.dataset.series) || {};
         const axis = row.querySelector("[data-sample-x]");
@@ -881,7 +879,6 @@ function show_range(svg) {
     const figure = svg.closest("figure");
     figure.querySelector("[data-chart-state]").textContent = svg.dataset.zoomed ? " · paused while zoomed" : "";
     show_ticks(svg);
-    figure.querySelector(".chart-readout").hidden = true;
     svg.querySelector("[data-cursor]").setAttribute("visibility", "hidden");
     figure.querySelector("output").textContent = "Visible " + svg.dataset.axis + ": " +
         chart_number(range_value(svg, box.x / 900)) + " to " +
